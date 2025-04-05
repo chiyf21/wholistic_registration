@@ -1,0 +1,26 @@
+# Ignore all files in results
+results/*
+# But keep the directory itself with .gitkeep
+*.DS_Store
+*.png
+*.tif
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.tiff
+*.pyc
+*.pyo
+*.pyd
+*.pyw
+*.pyz
+*.pywz
+*.pywz
+*.cpython*
+# ignore all .png files whereever they are
+**/*.png
+# ignore all .tif files wherever they are
+**/*.tif
+# ignore all .jpg files wherever they are
+**/*.jpg
+**/*.jpeg
