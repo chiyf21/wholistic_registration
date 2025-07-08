@@ -20,8 +20,10 @@ funtions:
 
     
 """
-import cupy as cp
-from cupyx.scipy.ndimage import convolve,correlate
+import numpy as np
+from . import cp, cupy_ndimage
+convolve = cupy_ndimage.convolve
+correlate = cupy_ndimage.correlate
 
 def imfilter(A, H, boundary='reflect', output='same', functionality='corr'):
     """

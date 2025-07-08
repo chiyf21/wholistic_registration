@@ -6,7 +6,7 @@ import numpy as np
 import os
 import tifffile
 from registration import motion_estimation
-import demo_data
+import registration.demo_data as demo_data
 import matplotlib.pyplot as plt
 from importlib import reload
 reload(demo_data)

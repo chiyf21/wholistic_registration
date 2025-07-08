@@ -22,12 +22,10 @@ functions:
     
 '''
 
-import cupy as cp
 import numpy as np
 from scipy.ndimage import zoom
-import cupyx.scipy.ndimage as Gimage 
-from cupyx.scipy.interpolate import RegularGridInterpolator
 import warnings
+from . import cp, Gimage, RegularGridInterpolator
 
 
     

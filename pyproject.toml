@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wholistic_registration"
+version = "0.1.0"
+description = "Whole Brain Image Registration with GPU acceleration support"
+requires-python = ">=3.8"
+dependencies = [
+    "numpy",
+    "scipy",
+    "matplotlib",
+    "tifffile",
+] 
+
+[project.optional-dependencies]
+gpu = ["cupy"]
+
+[tool.setuptools]
+package-dir = {"" = "src"}             

@@ -19,7 +19,8 @@ functions:
       
 """
 from __future__ import print_function
-import cupy as cp
+import numpy as np
+from . import cp
 from math import ceil, floor
 
 def deriveSizeFromScale(img_shape, scale):

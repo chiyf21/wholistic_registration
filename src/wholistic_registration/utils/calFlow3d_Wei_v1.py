@@ -29,11 +29,11 @@ Functions:
 """
 from scipy.ndimage import zoom, filters
 import numpy as np
-import cupy as cp
-from wbi import interp
-from wbi import calculate
-from wbi import visulization
-from wbi.imresize import imresize
+from . import cp
+from . import interp
+from . import calculate
+from . import visulization
+from .imresize import imresize
 def correctMotionGrid(data_raw,coords_new):
     """
     Correct the motion using 3D interpolation for GPU arrays.
@@ -102,7 +102,11 @@ def calError(It, penaltyRaw, smoothPenaltySum):
     # penaltyCorrected: Square the penaltyRaw and sum across the 4th dimension
     penaltyCorrected = cp.sum(penaltyRaw**2, axis=3) * smoothPenaltySum
     penaltyError = cp.sum(penaltyCorrected) / (x * y * z)
-    return diffError.get(), penaltyError.get()
+    # Handle both CuPy and NumPy arrays
+    if hasattr(diffError, 'get'):
+        return diffError.get(), penaltyError.get()
+    else:
+        return float(diffError), float(penaltyError)
 
 
 
@@ -437,7 +441,10 @@ def getMotion(dat_mov, dat_ref, smoothPenalty_raw, option):
         )
     coords_new = interp.correctGrid(motion_current,grid)
     # Gather the results
-    motion_current = cp.asnumpy(motion_current)
+    if hasattr(motion_current, 'get'):
+        motion_current = cp.asnumpy(motion_current)
+    else:
+        motion_current = np.asarray(motion_current)
 
     return motion_current, currentError, coords_new
 
