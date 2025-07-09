@@ -447,5 +447,15 @@ def getMotion(dat_mov, dat_ref, smoothPenalty_raw, option):
         motion_current = np.asarray(motion_current)
 
     return motion_current, currentError, coords_new
+    
+def correctMotion(data_raw,motion_field):
+    grid = np.meshgrid(
+            *[np.arange(n, dtype=np.float32) for n in data_raw.shape],
+            indexing='ij',
+            sparse=False,
+        )
+    coords_new=interp.correctGrid(motion_field,grid)
+    data_tran = correctMotionGrid(data_raw,coords_new)
+    return data_tran.get()
 
 
