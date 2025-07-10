@@ -456,6 +456,10 @@ def correctMotion(data_raw,motion_field):
         )
     coords_new=interp.correctGrid(motion_field,grid)
     data_tran = correctMotionGrid(data_raw,coords_new)
-    return data_tran.get()
+    if hasattr(data_tran, 'get'):
+        data_tran = cp.asnumpy(data_tran)
+    else:
+        data_tran = np.asarray(data_tran)
+    return data_tran
 
 

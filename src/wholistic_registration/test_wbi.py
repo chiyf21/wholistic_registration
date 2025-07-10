@@ -2,7 +2,7 @@
 import numpy as np
 import os
 import tifffile
-import demo_data
+import wholistic_registration.utils.demo_data as demo_data
 import matplotlib.pyplot as plt
 from importlib import reload
 reload(demo_data)
@@ -56,15 +56,29 @@ data_mov=frames[1][:,:,None]
 
 smoothPenalty_raw=0.01
 [X,Y,Z]=data_ref.shape
+
+option={
+    'layer':1, # pyramid layer number?  # if 256 x 256 - if layer is 2, then 128 x 128, and 256 x 256 2^layer
+    'iter':10, # number of iterations of fitting
+    'r':5, # radius of the patch - 2*r + !
+    'zRatio':27.693, # how much the z-axis is bigger than x and y
+    'motion':0,
+    'mask_ref':0,
+    'mask_mov':0
+}
+
 option['motion']= None
 option['mask_ref']=np.full(data_ref.shape,False,dtype=bool)
 option['mask_mov']=np.full(data_ref.shape,False,dtype=bool)
+
+
+
 
 Pnltfactor=preprocess.getSmPnltNormFctr(data_ref,option)
 smoothPenalty=Pnltfactor*smoothPenalty_raw
 import time
 start = time.time()
-motion_current = calFlow3d_Wei_v1.getMotion(
+motion_current, currentError, coords_new = calFlow3d_Wei_v1.getMotion(
     data_mov,
     data_ref,
 	smoothPenalty,
@@ -74,8 +88,31 @@ end = time.time()
 print("time:",end-start)
 #%%
 
+reload(calFlow3d_Wei_v1)
+data_mov_corrected = calFlow3d_Wei_v1.correctMotion(data_mov,motion_current)
+
+#%%
+
 plt.figure()
 plt.imshow(motion_current[0][:,:,0,0])
 plt.colorbar()
+plt.show()
+
+#%%
+
+plt.figure()
+plt.imshow(data_mov_corrected[:,:,0]-data_mov[:,:,0])
+plt.colorbar()
+plt.show()
+#%%
+plt.figure()
+plt.imshow(data_mov_corrected[:,:,0]-data_ref[:,:,0])
+plt.colorbar()
+plt.clim(-1,1)
+#%%
+plt.figure()
+plt.imshow(data_mov[:,:,0]-data_ref[:,:,0])
+plt.colorbar()
+plt.clim(-1,1)
 plt.show()
 #%%

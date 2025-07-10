@@ -1,5 +1,5 @@
 Metadata-Version: 2.4
-Name: wbolistic_registration
+Name: wholistic_registration
 Version: 0.1.0
 Summary: Whole Brain Image Registration with GPU acceleration support
 Requires-Python: >=3.8
