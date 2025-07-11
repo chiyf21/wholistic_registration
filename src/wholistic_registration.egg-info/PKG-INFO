@@ -7,3 +7,5 @@ Requires-Dist: numpy
 Requires-Dist: scipy
 Requires-Dist: matplotlib
 Requires-Dist: tifffile
+Provides-Extra: gpu
+Requires-Dist: cupy; extra == "gpu"

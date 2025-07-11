@@ -4,8 +4,10 @@ from utils import preprocess, calFlow3d_Wei_v1, visulization,mask,option
 import numpy as np
 import nd2
 
+
 #set the option
 option['r']=5
+
 
 
 #set basic parameters
@@ -17,6 +19,7 @@ thresFactor=5
 smFactor=50
 maskRange=[5,500]
 smoothPenalty_raw=0.01
+save_ite = 100
 
 #frame
 T=100
@@ -75,8 +78,10 @@ with nd2.ND2File(filePath) as f:
                 dat_ref = np.median(dat_channel2[:, :, :, ref_range], axis=3).astype(np.float32)
             
             # Generate and filter mask
-            option['mask_ref'] = mask.getMask(dat_ref, thresFactor)
-            option['mask_ref'] = mask.bwareafilt3_wei(option['mask_ref'], maskRange)
+            # option['mask_ref'] = mask.getMask(dat_ref, thresFactor)
+            # option['mask_ref'] = mask.bwareafilt3_wei(option['mask_ref'], maskRange)
+            option['mask_ref']=np.full(dat_ref.shape,False,dtype=bool)
+            option['mask_mov']=np.full(dat_ref.shape,False,dtype=bool)
             
             # Update penalty factor
             pnlt_factor = preprocess.getSmPnltNormFctr(dat_ref, option)

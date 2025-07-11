@@ -24,3 +24,4 @@ results/*
 # ignore all .jpg files wherever they are
 **/*.jpg
 **/*.jpeg
+.DS_Store

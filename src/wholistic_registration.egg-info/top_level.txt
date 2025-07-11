@@ -1,3 +1,2 @@
 demo_toy
-results
 wholistic_registration
