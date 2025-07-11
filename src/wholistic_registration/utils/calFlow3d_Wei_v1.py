@@ -355,6 +355,9 @@ def getMotion(dat_mov, dat_ref, smoothPenalty_raw, option):
         error_log[f"layer_{layer}"]["currentError"] = []
         error_log[f"layer_{layer}"]["motion_current"] = []
         error_log[f"layer_{layer}"]["data_trans"] = []
+        error_log[f"layer_{layer}"]["max_diff_motion"] = []
+        error_log[f"layer_{layer}"]["data_ref"] = []
+        error_log[f"layer_{layer}"]["data_mov"] = []
 
         print(f"starting layer {layer} out of {layer_num}")
 
@@ -370,6 +373,8 @@ def getMotion(dat_mov, dat_ref, smoothPenalty_raw, option):
         data2 = imresize(
             cp.asarray(dat_ref), output_shape=(x, y, z)
         )  # Shape: (x, y, z)
+        error_log[f"layer_{layer}"]["data_ref"].append(data2)
+        error_log[f"layer_{layer}"]["data_mov"].append(data1)
 
         # Update dimensions after downsampling
         x, y, z = data1.shape  # Updated dimensions for current level
@@ -535,9 +540,10 @@ def getMotion(dat_mov, dat_ref, smoothPenalty_raw, option):
             error_log[f"layer_{layer}"]["diffError"].append(diffError)
             error_log[f"layer_{layer}"]["penaltyError"].append(penaltyError)
             error_log[f"layer_{layer}"]["currentError"].append(currentError)
+            
 
             print(
-                f"Downsample layer: {layer}\tIter: {iter}\tError: {currentError}\tDiff Error: {diffError}\tPenalty Error: {penaltyError}"
+                f"Downsample layer: {layer}\tIter: {iter}\tError: {currentError:.3f}, Diff Error: {diffError:.3f}, Penalty Error: {penaltyError:.3f}"
             )
 
             # Check convergence: stop if error increases for multiple iterations
@@ -629,7 +635,10 @@ def getMotion(dat_mov, dat_ref, smoothPenalty_raw, option):
             )  # Shape: (len(xG), len(yG), len(zG))
 
             # print(f"motion_update_dist: {motion_update_dist}")
-
+            # check if any motion_udpted this is not 1.0
+            if cp.sum(motion_update_dist != 1) > 0:
+                print(f"motion_update_dist is not 1: {cp.sum(motion_update_dist != 1)}")
+                
             motion_update_normalized = (
                 motion_update_normalized / motion_update_dist[..., cp.newaxis]
             )  # Shape: (len(xG), len(yG), len(zG), 3)
@@ -669,11 +678,15 @@ def getMotion(dat_mov, dat_ref, smoothPenalty_raw, option):
 
             diff_motion = np.abs(motion_current - old_motion)
             max_diff_motion = np.max(diff_motion)
-
+            error_log[f"layer_{layer}"]["max_diff_motion"].append(max_diff_motion)
+            
             max_motion = np.max(np.abs(motion_current))
             print(
-                f"at iter {iter}, l {layer}, max motion: {max_motion}, max diff. old vs new motion: {max_diff_motion} \n\n"
+                f"Downsample layer: {layer}\tIter: {iter}\tMax motion: {max_motion:.2f}\tMax diff. old vs new motion: {max_diff_motion:.4f} \n\n"
             )
+            if max_diff_motion < 1e-2:
+                print("Max diff. old vs new motion is less than 1e-3")
+                break
 
 
     # Final output processing
