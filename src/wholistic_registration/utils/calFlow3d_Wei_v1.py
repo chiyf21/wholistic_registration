@@ -27,6 +27,7 @@ Functions:
 
 
 """
+
 from scipy.ndimage import zoom, filters
 import numpy as np
 from . import cp
@@ -34,6 +35,7 @@ from . import interp
 from . import calculate
 from . import visualization
 from .imresize import imresize
+
 
 def correctMotionGrid(data_raw, coords_new):
     """
@@ -48,23 +50,28 @@ def correctMotionGrid(data_raw, coords_new):
     """
     # Extract dimensions from input data
     x, y, z = data_raw.shape  # data_raw shape: (H, W, D)
-    
+
     # Ensure the data is on GPU and convert to float32 for precision
-    data_raw = cp.asarray(data_raw, dtype=cp.float32)  # Convert to GPU array, shape: (H, W, D)
+    data_raw = cp.asarray(
+        data_raw, dtype=cp.float32
+    )  # Convert to GPU array, shape: (H, W, D)
     coords_new = cp.asarray(coords_new)  # Convert to GPU array, shape: (H, W, D, 3)
-    
+
     # Transpose coordinates from (H, W, D, 3) to (3, H, W, D) for interpolation function
     # This reorders dimensions to match the expected input format for interp3Grid
     coords_new = cp.transpose(coords_new, (3, 0, 1, 2))  # Shape: (3, H, W, D)
-    
+
     # Perform 3D interpolation using the deformed coordinates
     # This warps the original data according to the motion field
-    data1_tran = interp.interp3Grid(data_raw, coords_new, method='linear')  # Shape: (H, W, D)
-    
+    data1_tran = interp.interp3Grid(
+        data_raw, coords_new, method="linear"
+    )  # Shape: (H, W, D)
+
     # Reshape the interpolated data back to original dimensions
     dat_corrected = cp.reshape(data1_tran, (x, y, z))  # Shape: (H, W, D)
 
     return dat_corrected
+
 
 def getNeiDiff(phi_current, r):
     """
@@ -79,21 +86,28 @@ def getNeiDiff(phi_current, r):
     """
     # Create the neighbor filter with size (2*r+1) x (2*r+1) x 1 x 1
     # This filter will be used to compute the difference between each point and its neighbors
-    NeiFltr = cp.ones((r*2+1, r*2+1, 1, 1), dtype=cp.float32)  # Shape: (2*r+1, 2*r+1, 1, 1)
+    NeiFltr = cp.ones(
+        (r * 2 + 1, r * 2 + 1, 1, 1), dtype=cp.float32
+    )  # Shape: (2*r+1, 2*r+1, 1, 1)
 
     # Normalize the filter by dividing by the number of neighbors (excluding center)
     # This ensures the filter sums to zero, making it a difference operator
-    NeiFltr = NeiFltr / ((r*2+1)**2 - 1)  # Normalize by number of neighbors minus center
-    
+    NeiFltr = NeiFltr / (
+        (r * 2 + 1) ** 2 - 1
+    )  # Normalize by number of neighbors minus center
+
     # Set the center element to -1 to create a difference filter
     # This makes the filter compute: (sum of neighbors) - center_value
     NeiFltr[r, r] = -1  # Center element becomes negative
-    
+
     # Apply the filter to compute neighbor differences
     # This enforces smoothness by penalizing large differences between neighboring motion vectors
-    neiDiff = calculate.imfilter(phi_current, NeiFltr, boundary='replicate', output='same', functionality='corr')  # Shape: (H, W, D, 3)
-    
+    neiDiff = calculate.imfilter(
+        phi_current, NeiFltr, boundary="replicate", output="same", functionality="corr"
+    )  # Shape: (H, W, D, 3)
+
     return neiDiff
+
 
 def calError(It, penaltyRaw, smoothPenaltySum):
     """
@@ -113,19 +127,22 @@ def calError(It, penaltyRaw, smoothPenaltySum):
     # Calculate the intensity difference error (mean squared error)
     # This measures how well the warped moving image matches the reference image
     diffError = cp.mean(It**2)  # Scalar value
-    
+
     # Calculate the smoothness penalty error
     # Square the penalty values and sum across the 4th dimension (x,y,z motion components)
-    penaltyCorrected = cp.sum(penaltyRaw**2, axis=3) * smoothPenaltySum  # Shape: (H, W, D)
-    
+    penaltyCorrected = (
+        cp.sum(penaltyRaw**2, axis=3) * smoothPenaltySum
+    )  # Shape: (H, W, D)
+
     # Normalize the penalty error by the total number of voxels
     penaltyError = cp.sum(penaltyCorrected) / (x * y * z)  # Scalar value
-    
+
     # Handle both CuPy and NumPy arrays by converting to CPU if needed
-    if hasattr(diffError, 'get'):
+    if hasattr(diffError, "get"):
         return diffError.get(), penaltyError.get()  # Convert GPU arrays to CPU
     else:
         return float(diffError), float(penaltyError)  # Already CPU arrays
+
 
 def getSpatialGradientInOrgGrid(data_raw, coords_new):
     """
@@ -133,7 +150,7 @@ def getSpatialGradientInOrgGrid(data_raw, coords_new):
 
     Args:
         data_raw (cupy.ndarray): The raw 3D data (GPU array), shape (H, W, D).
-        coords_new (cupy.ndarray): Deformed coordinates, shape (H, W, D, 3) 
+        coords_new (cupy.ndarray): Deformed coordinates, shape (H, W, D, 3)
                                    where coords_new[...,0]=x, coords_new[...,1]=y, coords_new[...,2]=z.
 
     Returns:
@@ -145,47 +162,66 @@ def getSpatialGradientInOrgGrid(data_raw, coords_new):
     x, y, z = data_raw.shape  # data_raw shape: (H, W, D)
 
     # Extract deformed coordinates for each dimension
-    x_coords, y_coords, z_coords = coords_new[...,0], coords_new[...,1], coords_new[...,2]  # Each shape: (H, W, D)
+    x_coords, y_coords, z_coords = (
+        coords_new[..., 0],
+        coords_new[..., 1],
+        coords_new[..., 2],
+    )  # Each shape: (H, W, D)
 
     # --- Compute gradient along x direction (Ix) ---
     # Perturb x-coordinate by adding and subtracting step
-    x_coords_incre = cp.clip(x_coords + step, 0, x-1)  # Shape: (H, W, D)
-    x_coords_decre = cp.clip(x_coords - step, 0, x-1)  # Shape: (H, W, D)
-    
+    x_coords_incre = cp.clip(x_coords + step, 0, x - 1)  # Shape: (H, W, D)
+    x_coords_decre = cp.clip(x_coords - step, 0, x - 1)  # Shape: (H, W, D)
+
     # Interpolate at (x+step, y, z) and (x-step, y, z) to get intensity values
-    data_incre = interp.interp3Grid(data_raw, cp.asarray((x_coords_incre, y_coords, z_coords)))  # Shape: (H, W, D)
-    data_decre = interp.interp3Grid(data_raw, cp.asarray((x_coords_decre, y_coords, z_coords)))  # Shape: (H, W, D)
-    
+    data_incre = interp.interp3Grid(
+        data_raw, cp.asarray((x_coords_incre, y_coords, z_coords))
+    )  # Shape: (H, W, D)
+    data_decre = interp.interp3Grid(
+        data_raw, cp.asarray((x_coords_decre, y_coords, z_coords))
+    )  # Shape: (H, W, D)
+
     # Compute x-gradient using finite differences
     Ix = (data_incre - data_decre) / (2 * step)  # Shape: (H, W, D)
 
     # --- Compute gradient along y direction (Iy) ---
     # Perturb y-coordinate by adding and subtracting step
-    y_coords_incre = cp.clip(y_coords + step, 0, y-1)  # Shape: (H, W, D)
-    y_coords_decre = cp.clip(y_coords - step, 0, y-1)  # Shape: (H, W, D)
-    
+    y_coords_incre = cp.clip(y_coords + step, 0, y - 1)  # Shape: (H, W, D)
+    y_coords_decre = cp.clip(y_coords - step, 0, y - 1)  # Shape: (H, W, D)
+
     # Interpolate at (x, y+step, z) and (x, y-step, z) to get intensity values
-    data_incre = interp.interp3Grid(data_raw, cp.asarray((x_coords, y_coords_incre, z_coords)))  # Shape: (H, W, D)
-    data_decre = interp.interp3Grid(data_raw, cp.asarray((x_coords, y_coords_decre, z_coords)))  # Shape: (H, W, D)
-    
+    data_incre = interp.interp3Grid(
+        data_raw, cp.asarray((x_coords, y_coords_incre, z_coords))
+    )  # Shape: (H, W, D)
+    data_decre = interp.interp3Grid(
+        data_raw, cp.asarray((x_coords, y_coords_decre, z_coords))
+    )  # Shape: (H, W, D)
+
     # Compute y-gradient using finite differences
     Iy = (data_incre - data_decre) / (2 * step)  # Shape: (H, W, D)
 
     # --- Compute gradient along z direction (Iz) ---
     # Perturb z-coordinate by adding and subtracting step
-    z_coords_incre = cp.clip(z_coords + step, 0, z-1)  # Shape: (H, W, D)
-    z_coords_decre = cp.clip(z_coords - step, 0, z-1)  # Shape: (H, W, D)
-    
+    z_coords_incre = cp.clip(z_coords + step, 0, z - 1)  # Shape: (H, W, D)
+    z_coords_decre = cp.clip(z_coords - step, 0, z - 1)  # Shape: (H, W, D)
+
     # Interpolate at (x, y, z+step) and (x, y, z-step) to get intensity values
-    data_incre = interp.interp3Grid(data_raw, cp.asarray((x_coords, y_coords, z_coords_incre)))  # Shape: (H, W, D)
-    data_decre = interp.interp3Grid(data_raw, cp.asarray((x_coords, y_coords, z_coords_decre)))  # Shape: (H, W, D)
-    
+    data_incre = interp.interp3Grid(
+        data_raw, cp.asarray((x_coords, y_coords, z_coords_incre))
+    )  # Shape: (H, W, D)
+    data_decre = interp.interp3Grid(
+        data_raw, cp.asarray((x_coords, y_coords, z_coords_decre))
+    )  # Shape: (H, W, D)
+
     # Compute z-gradient using finite differences
     Iz = (data_incre - data_decre) / (2 * step)  # Shape: (H, W, D)
 
     return Ix, Iy, Iz
 
-def getFlow3_withPenalty6(Ixx, Ixy, Ixz, Iyy, Iyz, Izz, Ixt, Iyt, Izt, getFlow3_withPenalty6, neiSum):
+
+def getFlow3_withPenalty6(
+    Ixx, Ixy, Ixz, Iyy, Iyz, Izz, Ixt, Iyt, Izt, smoothPenaltySum, neiSum
+):
     """
     Compute the flow with penalty and 3x3 matrix determinant using Lucas-Kanade method.
 
@@ -202,17 +238,17 @@ def getFlow3_withPenalty6(Ixx, Ixy, Ixz, Iyy, Iyz, Izz, Ixt, Iyt, Izt, getFlow3_
     Ixx += smoothPenaltySum  # Add penalty to x-x component
     Iyy += smoothPenaltySum  # Add penalty to y-y component
     Izz += smoothPenaltySum  # Add penalty to z-z component
-    
+
     # Add neighbor sum to the temporal gradient terms
     # This incorporates the smoothness constraint into the optical flow equation
     Ixt += neiSum[:, :, :, 0]  # Add x-component of neighbor sum
     Iyt += neiSum[:, :, :, 1]  # Add y-component of neighbor sum
     Izt += neiSum[:, :, :, 2]  # Add z-component of neighbor sum
-    
+
     # Calculate the determinant of the 3x3 structure tensor matrix
     # This is used to check if the matrix is invertible
     DET = calculate.getDet3(Ixx, Ixy, Ixz, Iyy, Iyz, Izz)  # Shape: (H, W, D)
-    
+
     # Calculate the minors (2x2 determinants) for the adjugate matrix
     # These are used to compute the inverse of the structure tensor
     M11 = calculate.getDet2(Iyy, Iyz, Iyz, Izz)  # Minor for (1,1) element
@@ -221,50 +257,59 @@ def getFlow3_withPenalty6(Ixx, Ixy, Ixz, Iyy, Iyz, Izz, Ixt, Iyt, Izt, getFlow3_
     M22 = calculate.getDet2(Ixx, Ixz, Ixz, Izz)  # Minor for (2,2) element
     M23 = -calculate.getDet2(Ixx, Ixy, Ixz, Iyz)  # Minor for (2,3) element (with sign)
     M33 = calculate.getDet2(Ixx, Ixy, Ixy, Iyy)  # Minor for (3,3) element
-    
+
     # Compute the optical flow using the inverse of the structure tensor
     # This is the Lucas-Kanade solution: v = -A^(-1) * b
     Vx = (M11 * Ixt + M12 * Iyt + M13 * Izt) / DET  # x-component of motion
     Vy = (M12 * Ixt + M22 * Iyt + M23 * Izt) / DET  # y-component of motion
     Vz = (M13 * Ixt + M23 * Iyt + M33 * Izt) / DET  # z-component of motion
-    
+
     # Stack the motion components into a single array
     phi_gradient = cp.stack((Vx, Vy, Vz), axis=-1)  # Shape: (H, W, D, 3)
-    
+
     # Replace NaN values with 0 to handle singular cases
     # This prevents numerical issues when the determinant is very small
-    phi_gradient[cp.isnan(phi_gradient)] = 0
 
+    num_nans = cp.isnan(phi_gradient)
+    if cp.sum(num_nans) > 0:
+        print(f"number of nans: {cp.sum(num_nans)}")
+        phi_gradient[cp.isnan(phi_gradient)] = 0
     return phi_gradient
+
 
 def compute_new_grid(grid, r, motion_shape):
     """
     Normalize the original grid to let the coordinates of control points be integer.
-    
+
     Args:
         grid (tuple): Original grid coordinates (x_coord, y_coord, z_coord), each shape (H, W, D).
         r (int): Filter radius.
         motion_shape (tuple): Shape of the motion field (H, W, D).
-        
+
     Returns:
         cupy.ndarray: Normalized grid coordinates, shape (3, H, W, D).
     """
     x_coord, y_coord, z_coord = grid  # Each shape: (H, W, D)
-    
+
     # Normalize x and y coordinates to control point grid
     # The factor (2*r+1) represents the spacing between control points
     x_new = (x_coord - r) / (2 * r + 1)  # Shape: (H, W, D)
     y_new = (y_coord - r) / (2 * r + 1)  # Shape: (H, W, D)
-    
+
     # Clamp the normalized coordinates to valid range
-    x_new = cp.minimum(cp.maximum(x_new, 0.), motion_shape[0])  # Clamp to [0, motion_shape[0]]
-    y_new = cp.minimum(cp.maximum(y_new, 0.), motion_shape[1])  # Clamp to [0, motion_shape[1]]
+    x_new = cp.minimum(
+        cp.maximum(x_new, 0.0), motion_shape[0]
+    )  # Clamp to [0, motion_shape[0]]
+    y_new = cp.minimum(
+        cp.maximum(y_new, 0.0), motion_shape[1]
+    )  # Clamp to [0, motion_shape[1]]
 
     # Keep z coordinate unchanged (no normalization needed)
     z_new = z_coord  # Shape: (H, W, D)
-    
+
     # Stack the normalized coordinates
     return cp.stack([x_new, y_new, z_new], axis=0)  # Shape: (3, H, W, D)
+
 
 def getMotion(dat_mov, dat_ref, smoothPenalty_raw, option):
     """
@@ -285,133 +330,215 @@ def getMotion(dat_mov, dat_ref, smoothPenalty_raw, option):
     error_log = {}
 
     # Convert masks to GPU arrays and ensure float32 precision
-    option['mask_ref'] = cp.asarray(option['mask_ref'], dtype=cp.float32)  # Shape: (H, W, D)
-    option['mask_mov'] = cp.asarray(option['mask_mov'], dtype=cp.float32)  # Shape: (H, W, D)
+    option["mask_ref"] = cp.asarray(
+        option["mask_ref"], dtype=cp.float32
+    )  # Shape: (H, W, D)
+    option["mask_mov"] = cp.asarray(
+        option["mask_mov"], dtype=cp.float32
+    )  # Shape: (H, W, D)
 
     # Extract parameters from option dictionary
-    layer_num = option['layer']              # Number of pyramid layers
-    iterNum = option['iter']                 # Number of iterations per layer
-    r = option['r']                         # Filter radius
-    zRatio_raw = option['zRatio']           # Z-axis scaling ratio
+    layer_num = option["layer"]  # Number of pyramid layers
+    iterNum = option["iter"]  # Number of iterations per layer
+    r = option["r"]  # Filter radius
+    zRatio_raw = option["zRatio"]  # Z-axis scaling ratio
 
     SZ = dat_mov.shape  # Original image dimensions
-    movRange = option['movRange']  # Maximum motion range for regularization
+    movRange = option["movRange"]  # Maximum motion range for regularization
 
     # Multi-scale processing: start from coarsest level and refine
     for layer in range(layer_num, -1, -1):
         # Initialize error tracking for this layer
-        error_log[f'layer_{layer}'] = {}
-        error_log[f'layer_{layer}']['diffError'] = []
-        error_log[f'layer_{layer}']['penaltyError'] = []
-        error_log[f'layer_{layer}']['currentError'] = []
-        error_log[f'layer_{layer}']['motion_current'] = []
+        error_log[f"layer_{layer}"] = {}
+        error_log[f"layer_{layer}"]["diffError"] = []
+        error_log[f"layer_{layer}"]["penaltyError"] = []
+        error_log[f"layer_{layer}"]["currentError"] = []
+        error_log[f"layer_{layer}"]["motion_current"] = []
+        error_log[f"layer_{layer}"]["data_trans"] = []
 
         print(f"starting layer {layer} out of {layer_num}")
-        
+
         # Calculate dimensions for current pyramid level
-        x = int(SZ[0]/(2 ** layer))  # Downsampled width
-        y = int(SZ[1]/(2 ** layer))  # Downsampled height
-        z = SZ[2]                    # Keep original depth
-        
+        x = int(SZ[0] / (2**layer))  # Downsampled width
+        y = int(SZ[1] / (2**layer))  # Downsampled height
+        z = SZ[2]  # Keep original depth
+
         # Downsample images to current pyramid level
-        data1 = imresize(cp.asarray(dat_mov), output_shape=(x,y,z))  # Shape: (x, y, z)
-        data2 = imresize(cp.asarray(dat_ref), output_shape=(x,y,z))  # Shape: (x, y, z)
-        
+        data1 = imresize(
+            cp.asarray(dat_mov), output_shape=(x, y, z)
+        )  # Shape: (x, y, z) # bicubic by default
+        data2 = imresize(
+            cp.asarray(dat_ref), output_shape=(x, y, z)
+        )  # Shape: (x, y, z)
+
         # Update dimensions after downsampling
         x, y, z = data1.shape  # Updated dimensions for current level
-        
+
         # Scale z-ratio for current pyramid level
-        zRatio = zRatio_raw / (2 ** layer)
-        
+        zRatio = zRatio_raw / (2**layer)
+
         # Initialize motion field for current layer
         if layer == layer_num:  # If at the coarsest level
-            if 'motion' in option and option['motion'] is not None:
+            if "motion" in option and option["motion"] is not None:
                 # Use provided initial motion field
-                motion_current = cp.zeros((x, y, z, 3), dtype=cp.float32)  # Shape: (x, y, z, 3)
-                motion_init = cp.array(option['motion'], dtype=cp.float32)  # Shape: (H, W, D, 3)
-                
+                motion_current = cp.zeros(
+                    (x, y, z, 3), dtype=cp.float32
+                )  # Shape: (x, y, z, 3)
+                motion_init = cp.array(
+                    option["motion"], dtype=cp.float32
+                )  # Shape: (H, W, D, 3)
+
                 # Downsample and scale the initial motion field
-                motion_current[:, :, :, 0] = cp.asarray(imresize(motion_init[:, :, :, 0], output_shape=(x,y,z))/(SZ[0]/x))  # Scale x-component
-                motion_current[:, :, :, 1] = cp.asarray(imresize(motion_init[:, :, :, 1], output_shape=(x,y,z))/(SZ[1]/y))  # Scale y-component
-                motion_current[:, :, :, 2] = cp.asarray(imresize(motion_init[:, :, :, 2], output_shape=(x,y,z))/(SZ[2]/z))  # Scale z-component
+                motion_current[:, :, :, 0] = cp.asarray(
+                    imresize(motion_init[:, :, :, 0], output_shape=(x, y, z))
+                    / (SZ[0] / x)
+                )  # Scale x-component
+                motion_current[:, :, :, 1] = cp.asarray(
+                    imresize(motion_init[:, :, :, 1], output_shape=(x, y, z))
+                    / (SZ[1] / y)
+                )  # Scale y-component
+                motion_current[:, :, :, 2] = cp.asarray(
+                    imresize(motion_init[:, :, :, 2], output_shape=(x, y, z))
+                    / (SZ[2] / z)
+                )  # Scale z-component
             else:
                 # Start with zero motion field
-                motion_current = cp.zeros((x, y, z, 3), dtype=cp.float32)  # Shape: (x, y, z, 3)
+                motion_current = cp.zeros(
+                    (x, y, z, 3), dtype=cp.float32
+                )  # Shape: (x, y, z, 3)
         else:
             # Upsample motion field from previous (finer) level
-            motion_current_temp = cp.asarray(motion_current)  # Shape: (prev_x, prev_y, prev_z, 3)
-            motion_current = cp.zeros((x, y, z, 3), dtype=cp.float32)  # Shape: (x, y, z, 3)
-            
+            motion_current_temp = cp.asarray(
+                motion_current
+            )  # Shape: (prev_x, prev_y, prev_z, 3)
+            motion_current = cp.zeros(
+                (x, y, z, 3), dtype=cp.float32
+            )  # Shape: (x, y, z, 3)
+
             # Upsample and scale motion components (x2 for x,y due to pyramid structure)
-            motion_current[:, :, :, 0] = cp.asarray(imresize(motion_current_temp[:, :, :, 0], output_shape=(x,y,z), method='bilinear')*2)  # Scale x-component
-            motion_current[:, :, :, 1] = cp.asarray(imresize(motion_current_temp[:, :, :, 1], output_shape=(x,y,z), method='bilinear')*2)  # Scale y-component
-            motion_current[:, :, :, 2] = cp.asarray(imresize(motion_current_temp[:, :, :, 2], output_shape=(x,y,z), method='bilinear'))  # Scale z-component
-            motion_current = cp.asarray(motion_current, dtype=cp.float32)  # Shape: (x, y, z, 3)
-        
+            motion_current[:, :, :, 0] = cp.asarray(
+                imresize(
+                    motion_current_temp[:, :, :, 0],
+                    output_shape=(x, y, z),
+                    method="bilinear",
+                )
+                * 2
+            )  # Scale x-component
+            motion_current[:, :, :, 1] = cp.asarray(
+                imresize(
+                    motion_current_temp[:, :, :, 1],
+                    output_shape=(x, y, z),
+                    method="bilinear",
+                )
+                * 2
+            )  # Scale y-component
+            motion_current[:, :, :, 2] = cp.asarray(
+                imresize(
+                    motion_current_temp[:, :, :, 2],
+                    output_shape=(x, y, z),
+                    method="bilinear",
+                )
+            )  # Scale z-component
+            motion_current = cp.asarray(
+                motion_current, dtype=cp.float32
+            )  # Shape: (x, y, z, 3)
+
         # Generate coordinate grid for current level
         grid = cp.meshgrid(
-            *[cp.arange(n, dtype=cp.float32) for n in data1.shape],  # Create coordinate arrays
-            indexing='ij',  # Use matrix indexing (row, column)
-            sparse=False,   # Return full grid
+            *[
+                cp.arange(n, dtype=cp.float32) for n in data1.shape
+            ],  # Create coordinate arrays
+            indexing="ij",  # Use matrix indexing (row, column)
+            sparse=False,  # Return full grid
         )  # Returns tuple of 3 arrays, each shape: (x, y, z)
-        
+
         # Downsample masks to current pyramid level
-        mask_ref = imresize(option['mask_ref'], output_shape=(x,y,z)) > 0  # Shape: (x, y, z)
-        mask_mov = imresize(option['mask_mov'], output_shape=(x,y,z))  # Shape: (x, y, z)
-        
+        mask_ref = (
+            imresize(option["mask_ref"], output_shape=(x, y, z)) > 0
+        )  # Shape: (x, y, z)
+        mask_mov = imresize(
+            option["mask_mov"], output_shape=(x, y, z)
+        )  # Shape: (x, y, z)
+
         # Initialize error tracking array for convergence checking
         oldError = cp.inf * cp.ones(3)  # Shape: (3,) - track last 3 errors
-        
+
         # Set up penalty parameters
         smoothPenalty = smoothPenalty_raw  # Smoothness penalty weight
         patchConnectNum = (r * 2 + 1) ** 2  # Number of connected patches
         smoothPenaltySum = smoothPenalty * patchConnectNum  # Total penalty weight
 
         # Define control point grid (sparse grid for motion computation)
-        xG = cp.arange(r, x-1, step=2*r+1)  # Control points in x direction
-        yG = cp.arange(r, y-1, step=2*r+1)  # Control points in y direction
-        zG = cp.arange(0, z)                 # All z positions
-        xG_grid, yG_grid, zG_grid = cp.meshgrid(xG, yG, zG, indexing='ij')  # Shape: (len(xG), len(yG), len(zG))
+        xG = cp.arange(r, x - 1, step=2 * r + 1)  # Control points in x direction
+        yG = cp.arange(r, y - 1, step=2 * r + 1)  # Control points in y direction
+        zG = cp.arange(0, z)  # All z positions
+        xG_grid, yG_grid, zG_grid = cp.meshgrid(
+            xG, yG, zG, indexing="ij"
+        )  # Shape: (len(xG), len(yG), len(zG))
 
         # Main iteration loop for motion estimation
         for iter in range(iterNum):
             old_motion = motion_current.copy()
             # Apply current motion field to get warped moving image
-            coords_new = interp.correctGrid(motion_current, grid)  # Shape: (x, y, z, 3)
-            data1_tran = correctMotionGrid(data1, coords_new)  # Shape: (x, y, z)
+            coords_new = interp.correctGrid(motion_current, grid)  # Shape: (x, y, z, 3) # add grid coordinates to motion
+            data1_tran = correctMotionGrid(data1, coords_new)  # Shape: (x, y, z) # get data1 at new coordinates/motion control points
+            
+            # Save motion field periodically for logging
+            if iter % option["save_ite"] == 0:
+                error_log[f"layer_{layer}"]["data_trans"].append(data1_tran)
+                if hasattr(motion_current, "get"):
+                    error_log[f"layer_{layer}"]["motion_current"].append(
+                        cp.asnumpy(motion_current)
+                    )  # Convert to CPU
+                else:
+                    error_log[f"layer_{layer}"]["motion_current"].append(
+                        np.asarray(motion_current)
+                    )  # Already CPU
 
             # Apply motion to moving mask and combine with reference mask
-            mask_mov_current = correctMotionGrid(mask_mov, coords_new) > 0  # Shape: (x, y, z)
+            mask_mov_current = (
+                correctMotionGrid(mask_mov, coords_new) > 0
+            )  # Shape: (x, y, z)
             mask = mask_mov_current | mask_ref  # Shape: (x, y, z) - combined mask
-            
+
             # Compute temporal difference between reference and warped moving image
-            It = data2 - data1_tran  # Shape: (x, y, z)
-            
+            It = data2 - data1_tran  # Shape: (x, y, z) # temporal difference
+
             # Apply spatial smoothing to temporal difference
-            It = calculate.imfilter(It, cp.ones((3,3,1))/9, 'replicate', 'same', 'corr')  # Shape: (x, y, z)
-            
+            It = calculate.imfilter(
+                It, cp.ones((3, 3, 1)) / 9, "replicate", "same", "corr"
+            )  # Shape: (x, y, z)
+
             # Zero out masked regions (where we don't want to compute motion)
             It[mask] = 0  # Shape: (x, y, z)
-            
+
             # Compute neighbor motion differences for smoothness constraint
-            neiDiff = getNeiDiff(motion_current[xG_grid, yG_grid, zG_grid, :], 1)  # Shape: (len(xG), len(yG), len(zG), 3)
-            
+            neiDiff = getNeiDiff(
+                motion_current[xG_grid, yG_grid, zG_grid, :], 1
+            )  # Shape: (len(xG), len(yG), len(zG), 3)
+
             # Scale z-component by z-ratio to account for anisotropic voxels
-            neiDiff[:, :, :, 2] = neiDiff[:, :, :, 2] * zRatio  # Shape: (len(xG), len(yG), len(zG), 3)
-        
+            neiDiff[:, :, :, 2] = (
+                neiDiff[:, :, :, 2] * zRatio
+            )  # Shape: (len(xG), len(yG), len(zG), 3)
+
             # Compute smoothness penalty term
             neiSum = smoothPenaltySum * neiDiff  # Shape: (len(xG), len(yG), len(zG), 3)
 
             # Calculate error terms for convergence checking
-            diffError, penaltyError = calError(It, neiDiff, smoothPenaltySum)  # Both scalar values
+            diffError, penaltyError = calError(
+                It, neiDiff, smoothPenaltySum
+            )  # Both scalar values
             currentError = diffError + penaltyError  # Total error
 
             # Log errors for this iteration
-            error_log[f'layer_{layer}']['diffError'].append(diffError)
-            error_log[f'layer_{layer}']['penaltyError'].append(penaltyError)
-            error_log[f'layer_{layer}']['currentError'].append(currentError)
+            error_log[f"layer_{layer}"]["diffError"].append(diffError)
+            error_log[f"layer_{layer}"]["penaltyError"].append(penaltyError)
+            error_log[f"layer_{layer}"]["currentError"].append(currentError)
 
-            print(f"Downsample layer: {layer}\tIter: {iter}\tError: {currentError}\tDiff Error: {diffError}\tPenalty Error: {penaltyError}")
+            print(
+                f"Downsample layer: {layer}\tIter: {iter}\tError: {currentError}\tDiff Error: {diffError}\tPenalty Error: {penaltyError}"
+            )
 
             # Check convergence: stop if error increases for multiple iterations
             if iter == iterNum - 1:
@@ -426,34 +553,56 @@ def getMotion(dat_mov, dat_ref, smoothPenalty_raw, option):
             else:
                 # Update error history (shift and add new error)
                 oldError[:-1] = oldError[1:]  # Shift left
-                oldError[-1] = currentError    # Add new error
-            
+                oldError[-1] = currentError  # Add new error
+
             # Compute spatial gradients of the moving image at deformed coordinates
-            Ix, Iy, Iz = getSpatialGradientInOrgGrid(data1, coords_new)  # Each shape: (x, y, z)
+            Ix, Iy, Iz = getSpatialGradientInOrgGrid(
+                data1, coords_new
+            )  # Each shape: (x, y, z)
 
             # Zero out masked regions in gradients
             Ix[mask] = 0  # Shape: (x, y, z)
             Iy[mask] = 0  # Shape: (x, y, z)
             Iz[mask] = 0  # Shape: (x, y, z)
-            
+
             # Scale z-gradient by z-ratio for anisotropic voxels
             Iz = Iz / zRatio  # Shape: (x, y, z)
 
             # Compute structure tensor components using spatial averaging
-            AverageFilter = cp.ones((r*2+1, r*2+1, 1))  # Shape: (2*r+1, 2*r+1, 1)
-            
+            AverageFilter = cp.ones(
+                (r * 2 + 1, r * 2 + 1, 1)
+            )  # Shape: (2*r+1, 2*r+1, 1)
+
             # Compute all components of the structure tensor
-            Ixx = calculate.imfilter(Ix**2, AverageFilter, 'replicate', 'same', 'corr')  # Shape: (x, y, z)
-            Ixy = calculate.imfilter(Ix*Iy, AverageFilter, 'replicate', 'same', 'corr')  # Shape: (x, y, z)
-            Ixz = calculate.imfilter(Ix*Iz, AverageFilter, 'replicate', 'same', 'corr')  # Shape: (x, y, z)
-            Iyy = calculate.imfilter(Iy**2, AverageFilter, 'replicate', 'same', 'corr')  # Shape: (x, y, z)
-            Iyz = calculate.imfilter(Iy*Iz, AverageFilter, 'replicate', 'same', 'corr')  # Shape: (x, y, z)
-            Izz = calculate.imfilter(Iz**2, AverageFilter, 'replicate', 'same', 'corr')  # Shape: (x, y, z)
-            
+            Ixx = calculate.imfilter(
+                Ix**2, AverageFilter, "replicate", "same", "corr"
+            )  # Shape: (x, y, z)
+            Ixy = calculate.imfilter(
+                Ix * Iy, AverageFilter, "replicate", "same", "corr"
+            )  # Shape: (x, y, z)
+            Ixz = calculate.imfilter(
+                Ix * Iz, AverageFilter, "replicate", "same", "corr"
+            )  # Shape: (x, y, z)
+            Iyy = calculate.imfilter(
+                Iy**2, AverageFilter, "replicate", "same", "corr"
+            )  # Shape: (x, y, z)
+            Iyz = calculate.imfilter(
+                Iy * Iz, AverageFilter, "replicate", "same", "corr"
+            )  # Shape: (x, y, z)
+            Izz = calculate.imfilter(
+                Iz**2, AverageFilter, "replicate", "same", "corr"
+            )  # Shape: (x, y, z)
+
             # Compute temporal gradient components
-            Ixt = calculate.imfilter(Ix*It, AverageFilter, 'replicate', 'same', 'corr')  # Shape: (x, y, z)
-            Iyt = calculate.imfilter(Iy*It, AverageFilter, 'replicate', 'same', 'corr')  # Shape: (x, y, z)
-            Izt = calculate.imfilter(Iz*It, AverageFilter, 'replicate', 'same', 'corr')  # Shape: (x, y, z)
+            Ixt = calculate.imfilter(
+                Ix * It, AverageFilter, "replicate", "same", "corr"
+            )  # Shape: (x, y, z)
+            Iyt = calculate.imfilter(
+                Iy * It, AverageFilter, "replicate", "same", "corr"
+            )  # Shape: (x, y, z)
+            Izt = calculate.imfilter(
+                Iz * It, AverageFilter, "replicate", "same", "corr"
+            )  # Shape: (x, y, z)
 
             # Extract values at control points only (sparse grid)
             Ixx = Ixx[xG_grid, yG_grid, zG_grid]  # Shape: (len(xG), len(yG), len(zG))
@@ -467,96 +616,118 @@ def getMotion(dat_mov, dat_ref, smoothPenalty_raw, option):
             Izt = Izt[xG_grid, yG_grid, zG_grid]  # Shape: (len(xG), len(yG), len(zG))
 
             # Compute motion update using Lucas-Kanade method with smoothness penalty
-            motion_update_normalized = getFlow3_withPenalty6(Ixx, Ixy, Ixz, Iyy, Iyz, Izz, Ixt, Iyt, Izt, smoothPenaltySum, neiSum)  # Shape: (len(xG), len(yG), len(zG), 3)
+            motion_update_normalized = getFlow3_withPenalty6(
+                Ixx, Ixy, Ixz, Iyy, Iyz, Izz, Ixt, Iyt, Izt, smoothPenaltySum, neiSum
+            )  # Shape: (len(xG), len(yG), len(zG), 3) # solve the linear system of equations
 
             # Limit motion update magnitude for stability
-            motion_update_dist = cp.sqrt(cp.sum(motion_update_normalized ** 2, axis=3))  # Shape: (len(xG), len(yG), len(zG))
-            motion_update_dist = cp.maximum(motion_update_dist / movRange, 1.0)  # Shape: (len(xG), len(yG), len(zG))
+            motion_update_dist = cp.sqrt(
+                cp.sum(motion_update_normalized**2, axis=3)
+            )  # Shape: (len(xG), len(yG), len(zG))
+            motion_update_dist = cp.maximum(
+                motion_update_dist / movRange, 1.0
+            )  # Shape: (len(xG), len(yG), len(zG))
 
             # print(f"motion_update_dist: {motion_update_dist}")
 
-            motion_update_normalized = motion_update_normalized / motion_update_dist[..., cp.newaxis]  # Shape: (len(xG), len(yG), len(zG), 3)
+            motion_update_normalized = (
+                motion_update_normalized / motion_update_dist[..., cp.newaxis]
+            )  # Shape: (len(xG), len(yG), len(zG), 3)
 
             # Final motion update (unnormalized)
-            motion_update = motion_update_normalized  # Shape: (len(xG), len(yG), len(zG), 3)
+            motion_update = (
+                motion_update_normalized  # Shape: (len(xG), len(yG), len(zG), 3)
+            )
 
             # Scale z-component by z-ratio
-            motion_update[:, :, :, 2] = motion_update[:, :, :, 2] / zRatio  # Shape: (len(xG), len(yG), len(zG), 3)
+            motion_update[:, :, :, 2] = (
+                motion_update[:, :, :, 2] / zRatio
+            )  # Shape: (len(xG), len(yG), len(zG), 3)
 
             # Update motion at control points
-            motion_current_CP = motion_current[xG_grid, yG_grid, zG_grid, :] + motion_update  # Shape: (len(xG), len(yG), len(zG), 3)
+            motion_current_CP = (
+                motion_current[xG_grid, yG_grid, zG_grid, :] + motion_update
+            )  # Shape: (len(xG), len(yG), len(zG), 3)
 
             # Interpolate motion update from control points to full grid
-            coords_new = compute_new_grid(grid, r, motion_current_CP.shape)  # Shape: (3, x, y, z)
+            coords_new = compute_new_grid(
+                grid, r, motion_current_CP.shape # is integer at each control point # unclear why this is needed at every iteration - does CP number ever change?
+            )  # Shape: (3, x, y, z) # 
+            # print("shape of coords_new", coords_new[0].shape)
+            # print("shape of grid", grid[0].shape)
 
             # Interpolate each motion component separately
             for dirNum in range(3):
-                temp_phi = cp.asarray(motion_current_CP[:, :, :, dirNum])  # Shape: (len(xG), len(yG), len(zG))
-                motion_current[:, :, :, dirNum] = interp.interp3Grid(temp_phi, coords_new).reshape(x,y,z)  # Shape: (x, y, z)
+                temp_phi = cp.asarray(
+                    motion_current_CP[:, :, :, dirNum]
+                )  # Shape: (len(xG), len(yG), len(zG))
+                motion_current[:, :, :, dirNum] = interp.interp3Grid(
+                    temp_phi, coords_new
+                ).reshape(
+                    x, y, z
+                )  # Shape: (x, y, z)
 
-            diff_motion = motion_current - old_motion
-            diff_motion_norm = cp.sqrt(cp.sum(diff_motion ** 2, axis=3))
-            max_diff_motion = np.max(diff_motion_norm)
+            diff_motion = np.abs(motion_current - old_motion)
+            max_diff_motion = np.max(diff_motion)
+
             max_motion = np.max(np.abs(motion_current))
-            print(f"at iter {iter}, layer {layer}, max diff. old and new motion: {max_diff_motion}, max motion: {max_motion}\n\n")
-            
-          
-            # Save motion field periodically for logging
-            if iter % option['save_ite'] == 0:
-                if hasattr(motion_current, 'get'):
-                    error_log[f'layer_{layer}']['motion_current'].append(cp.asnumpy(motion_current))  # Convert to CPU
-                else:
-                    error_log[f'layer_{layer}']['motion_current'].append(np.asarray(motion_current))  # Already CPU
+            print(
+                f"at iter {iter}, l {layer}, max motion: {max_motion}, max diff. old vs new motion: {max_diff_motion} \n\n"
+            )
+
 
     # Final output processing
     # Generate final coordinate grid
     grid = cp.meshgrid(
-        *[cp.arange(n, dtype=cp.float32) for n in data1.shape],  # Create coordinate arrays
-        indexing='ij',  # Use matrix indexing
-        sparse=False,   # Return full grid
+        *[
+            cp.arange(n, dtype=cp.float32) for n in data1.shape
+        ],  # Create coordinate arrays
+        indexing="ij",  # Use matrix indexing
+        sparse=False,  # Return full grid
     )  # Returns tuple of 3 arrays, each shape: (x, y, z)
-    
+
     # Compute final corrected coordinates
     coords_new = interp.correctGrid(motion_current, grid)  # Shape: (x, y, z, 3)
-    
+
     # Convert motion field to CPU if needed
-    if hasattr(motion_current, 'get'):
+    if hasattr(motion_current, "get"):
         motion_current = cp.asnumpy(motion_current)  # Convert GPU array to CPU
     else:
         motion_current = np.asarray(motion_current)  # Already CPU array
 
     return motion_current, currentError, coords_new, error_log
-    
+
+
 def correctMotion(data_raw, motion_field):
     """
     Apply motion correction to raw data using the computed motion field.
-    
+
     Args:
         data_raw (numpy.ndarray): The raw 3D data, shape (H, W, D).
         motion_field (numpy.ndarray): The computed motion field, shape (H, W, D, 3).
-        
+
     Returns:
         data_tran (numpy.ndarray): The motion-corrected data, shape (H, W, D).
     """
     # Generate coordinate grid for the data
     grid = np.meshgrid(
-        *[np.arange(n, dtype=np.float32) for n in data_raw.shape],  # Create coordinate arrays
-        indexing='ij',  # Use matrix indexing
-        sparse=False,   # Return full grid
+        *[
+            np.arange(n, dtype=np.float32) for n in data_raw.shape
+        ],  # Create coordinate arrays
+        indexing="ij",  # Use matrix indexing
+        sparse=False,  # Return full grid
     )  # Returns tuple of 3 arrays, each shape: (H, W, D)
-    
+
     # Compute corrected coordinates using motion field
     coords_new = interp.correctGrid(motion_field, grid)  # Shape: (H, W, D, 3)
-    
+
     # Apply motion correction using 3D interpolation
     data_tran = correctMotionGrid(data_raw, coords_new)  # Shape: (H, W, D)
-    
+
     # Convert to CPU if needed
-    if hasattr(data_tran, 'get'):
+    if hasattr(data_tran, "get"):
         data_tran = cp.asnumpy(data_tran)  # Convert GPU array to CPU
     else:
         data_tran = np.asarray(data_tran)  # Already CPU array
-    
+
     return data_tran
-
-

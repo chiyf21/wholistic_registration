@@ -29,7 +29,7 @@ nd2_file = nd2_files[0]
 option={
     'layer': 0,
     'iter': 10,
-    'r': 2,
+    'r': 5,
     'zRatio': 27.693,
     'motion': 0,
     'mask_ref': 0,
@@ -46,7 +46,7 @@ thresFactor=5
 smFactor=50
 maskRange=[5,500]
 smoothPenalty_raw=0.01
-smoothPenalty_raw=100 # larger the less penalized
+smoothPenalty_raw=1 
 
 T=19000
 # idx = np.arange(0,T,frameJump)
@@ -64,8 +64,8 @@ reload(preprocess)
 reload(calFlow3d_Wei_v1)
 reload(wholistic_registration)
 
-slx = slice(500, 750)
-sly = slice(500, 750)
+slx = slice(350, 750)
+sly = slice(350, 750)
 
 with nd2.ND2File(nd2_file) as f:
     metadata=f.metadata
@@ -109,7 +109,7 @@ with nd2.ND2File(nd2_file) as f:
         Ca_data=f.to_dask()[:,0,slx,sly][:,None]
 
 
-    dat_ref=np.roll(dask_data[0].compute().transpose(2,1,0),10,axis=1)
+    dat_ref=np.roll(dask_data[0].compute().transpose(2,1,0),10,axis=1).copy()
     print(f"dat_ref.shape is {dat_ref.shape}")
     # option['mask_ref']=mask.getMask(dat_ref,thresFactor)
     # option['mask_ref']=mask.bwareafilt3_wei(option['mask_ref'],maskRange)
@@ -152,30 +152,42 @@ with nd2.ND2File(nd2_file) as f:
         # print(f"option is {option}")
         # print(f"shape of option['motion'] is {option['motion'].shape}")
         motion_current, currentError, coords_new, error_log = utils.calFlow3d_Wei_v1.getMotion(dat_mov,dat_ref,smoothPenalty,option)
-
         for ind, key in enumerate(list(error_log.keys())[-1:]):
             ncorrections = len(error_log[key]['motion_current'])
             motions = np.array([mc for mc in error_log[key]['motion_current']])
-            corr_dat = [utils.calFlow3d_Wei_v1.correctMotion(dat_mov,mc) for mc in error_log[key]['motion_current']]
+            corr_dat = np.array([mc for mc in error_log[key]['data_trans']])
+            # corr_dat = [utils.calFlow3d_Wei_v1.correctMotion(data_mov,mc) for mc in error_log[key]['motion_current']]
             corr_dat = np.array(corr_dat)
-        corr_dat = np.concatenate([dat_ref[None],dat_mov[None],corr_dat],axis=0)
-        corr_dat = corr_dat.transpose(0,3,2,1)[:,None].astype('float32')
-        motions = motions.transpose(0,4,3,2,1).astype('float32')
-        tf.imwrite(tif_dir + f'registered_motion_iterations_{t}.tif', motions, imagej=True)
-        tf.imwrite(tif_dir + f'registered_data_iterations_{t}.tif', corr_dat, imagej=True)
+            corr_dat = np.concatenate([dat_mov[None],corr_dat],axis=0)
+            corr_dat = corr_dat.transpose(0,3,2,1)[:,None].astype('float32')
+            motions = motions.transpose(0,4,3,2,1).astype('float32')
 
-        dat_channel1[:,:,:,tCnt]=utils.calFlow3d_Wei_v1.correctMotion(Ca_data[t].compute().transpose(2,1,0),motion_current)
-        dat_channel2[:,:,:,tCnt]=utils.calFlow3d_Wei_v1.correctMotion(dat_mov,motion_current)
-        dat_channel2_raw[:,:,:,tCnt]=dat_mov
-        dat_refs[:,:,:,tCnt]=dat_ref
+
+        tf.imwrite(os.path.join(tif_dir, 'registered_data_iterations.tif'), corr_dat, imagej=True)
+        tf.imwrite(os.path.join(tif_dir, 'registered_motion_iterations.tif'), motions, imagej=True)
+        # for ind, key in enumerate(list(error_log.keys())[-1:]):
+        #     ncorrections = len(error_log[key]['motion_current'])
+        #     motions = np.array([mc for mc in error_log[key]['motion_current']])
+        #     corr_dat = [utils.calFlow3d_Wei_v1.correctMotion(dat_mov,mc) for mc in error_log[key]['motion_current']]
+        #     corr_dat = np.array(corr_dat)
+        # corr_dat = np.concatenate([dat_ref[None],dat_mov[None],corr_dat],axis=0)
+        # corr_dat = corr_dat.transpose(0,3,2,1)[:,None].astype('float32')
+        # motions = motions.transpose(0,4,3,2,1).astype('float32')
+        # tf.imwrite(tif_dir + f'registered_motion_iterations_{t}.tif', motions, imagej=True)
+        # tf.imwrite(tif_dir + f'registered_data_iterations_{t}.tif', corr_dat, imagej=True)
+
+        # dat_channel1[:,:,:,tCnt]=utils.calFlow3d_Wei_v1.correctMotion(Ca_data[t].compute().transpose(2,1,0),motion_current)
+        # dat_channel2[:,:,:,tCnt]=utils.calFlow3d_Wei_v1.correctMotion(dat_mov,motion_current)
+        # dat_channel2_raw[:,:,:,tCnt]=dat_mov
+        # dat_refs[:,:,:,tCnt]=dat_ref
 
 
 
                 
 
-    dat_channel = np.concatenate([dat_channel1[None],dat_channel2[None]],axis=0).transpose(4,3,0,2,1)
-    dat_refs_ = np.concatenate([dat_refs[None],dat_channel2_raw[None]],axis=0).transpose(4,3,0,2,1)
-    all_data = np.concatenate([dat_channel2_raw[None], dat_channel2[None],dat_refs[None]],axis=0).transpose(4,3,0,2,1)
+    # dat_channel = np.concatenate([dat_channel1[None],dat_channel2[None]],axis=0).transpose(4,3,0,2,1)
+    # dat_refs_ = np.concatenate([dat_refs[None],dat_channel2_raw[None]],axis=0).transpose(4,3,0,2,1)
+    # all_data = np.concatenate([dat_channel2_raw[None], dat_channel2[None],dat_refs[None]],axis=0).transpose(4,3,0,2,1)
 
 
     # tt = dat_channel.shape[0]
