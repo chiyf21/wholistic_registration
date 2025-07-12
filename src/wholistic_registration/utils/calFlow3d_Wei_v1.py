@@ -311,7 +311,7 @@ def compute_new_grid(grid, r, motion_shape):
     return cp.stack([x_new, y_new, z_new], axis=0)  # Shape: (3, H, W, D)
 
 
-def getMotion(dat_mov, dat_ref, smoothPenalty_raw, option):
+def getMotion(dat_mov, dat_ref, smoothPenalty_raw, option, verbose=False, tol=1e-4):
     """
     Function to compute motion correction using multi-scale approach.
 
@@ -356,10 +356,10 @@ def getMotion(dat_mov, dat_ref, smoothPenalty_raw, option):
         error_log[f"layer_{layer}"]["motion_current"] = []
         error_log[f"layer_{layer}"]["data_trans"] = []
         error_log[f"layer_{layer}"]["max_diff_motion"] = []
-        error_log[f"layer_{layer}"]["data_ref"] = []
-        error_log[f"layer_{layer}"]["data_mov"] = []
+        
 
-        print(f"starting layer {layer} out of {layer_num}")
+        if verbose:
+            print(f"starting layer {layer} out of {layer_num}")
 
         # Calculate dimensions for current pyramid level
         x = int(SZ[0] / (2**layer))  # Downsampled width
@@ -373,8 +373,8 @@ def getMotion(dat_mov, dat_ref, smoothPenalty_raw, option):
         data2 = imresize(
             cp.asarray(dat_ref), output_shape=(x, y, z)
         )  # Shape: (x, y, z)
-        error_log[f"layer_{layer}"]["data_ref"].append(data2)
-        error_log[f"layer_{layer}"]["data_mov"].append(data1)
+        error_log[f"layer_{layer}"]["data_ref"] = data2
+        error_log[f"layer_{layer}"]["data_mov"] = data1
 
         # Update dimensions after downsampling
         x, y, z = data1.shape  # Updated dimensions for current level
@@ -493,11 +493,11 @@ def getMotion(dat_mov, dat_ref, smoothPenalty_raw, option):
                 error_log[f"layer_{layer}"]["data_trans"].append(data1_tran)
                 if hasattr(motion_current, "get"):
                     error_log[f"layer_{layer}"]["motion_current"].append(
-                        cp.asnumpy(motion_current)
+                        cp.asnumpy(motion_current).copy()
                     )  # Convert to CPU
                 else:
                     error_log[f"layer_{layer}"]["motion_current"].append(
-                        np.asarray(motion_current)
+                        np.asarray(motion_current).copy()
                     )  # Already CPU
 
             # Apply motion to moving mask and combine with reference mask
@@ -542,9 +542,10 @@ def getMotion(dat_mov, dat_ref, smoothPenalty_raw, option):
             error_log[f"layer_{layer}"]["currentError"].append(currentError)
             
 
-            print(
-                f"Downsample layer: {layer}\tIter: {iter}\tError: {currentError:.3f}, Diff Error: {diffError:.3f}, Penalty Error: {penaltyError:.3f}"
-            )
+            if verbose:
+                print(
+                    f"Downsample layer: {layer}\tIter: {iter}\tError: {currentError:.3f}, Diff Error: {diffError:.3f}, Penalty Error: {penaltyError:.3f}"
+                )
 
             # Check convergence: stop if error increases for multiple iterations
             if iter == iterNum - 1:
@@ -553,7 +554,7 @@ def getMotion(dat_mov, dat_ref, smoothPenalty_raw, option):
             elif cp.sum(oldError <= currentError) > 1:
                 print("Error increased for multiple iterations")
                 break
-            elif np.abs(oldError[-1] - currentError) < 1e-3:
+            elif np.abs(oldError[-1] - currentError) < tol:
                 print("Absolute difference between old and new error is less than 1e-3")
                 break
             else:
@@ -636,8 +637,9 @@ def getMotion(dat_mov, dat_ref, smoothPenalty_raw, option):
 
             # print(f"motion_update_dist: {motion_update_dist}")
             # check if any motion_udpted this is not 1.0
-            if cp.sum(motion_update_dist != 1) > 0:
-                print(f"motion_update_dist is not 1: {cp.sum(motion_update_dist != 1)}")
+            if verbose:
+                if cp.sum(motion_update_dist != 1) > 0:
+                    print(f"motion_update_dist is not 1: {cp.sum(motion_update_dist != 1)}")
                 
             motion_update_normalized = (
                 motion_update_normalized / motion_update_dist[..., cp.newaxis]
@@ -662,8 +664,7 @@ def getMotion(dat_mov, dat_ref, smoothPenalty_raw, option):
             coords_new = compute_new_grid(
                 grid, r, motion_current_CP.shape # is integer at each control point # unclear why this is needed at every iteration - does CP number ever change?
             )  # Shape: (3, x, y, z) # 
-            # print("shape of coords_new", coords_new[0].shape)
-            # print("shape of grid", grid[0].shape)
+
 
             # Interpolate each motion component separately
             for dirNum in range(3):
@@ -681,10 +682,12 @@ def getMotion(dat_mov, dat_ref, smoothPenalty_raw, option):
             error_log[f"layer_{layer}"]["max_diff_motion"].append(max_diff_motion)
             
             max_motion = np.max(np.abs(motion_current))
-            print(
-                f"Downsample layer: {layer}\tIter: {iter}\tMax motion: {max_motion:.2f}\tMax diff. old vs new motion: {max_diff_motion:.4f} \n\n"
-            )
-            if max_diff_motion < 1e-2:
+            if verbose:
+                print(
+                    f"Downsample layer: {layer}\tIter: {iter}\tMax motion: {max_motion:.2f}\tMax diff. old vs new motion: {max_diff_motion:.4f} \n\n"
+                )
+
+            if max_diff_motion < 1e-3:
                 print("Max diff. old vs new motion is less than 1e-3")
                 break
 

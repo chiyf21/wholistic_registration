@@ -9,7 +9,10 @@ import os
 from wholistic_registration import utils
 from importlib import reload
 import tifffile as tf
+from time import time
+import cupy as cp
 
+t0 = time()
 reload(utils)
 reload(preprocess)
 reload(calFlow3d_Wei_v1)
@@ -27,55 +30,66 @@ nd2_file = nd2_files[0]
 
 
 option={
-    'layer': 2,
-    'iter': 200,
+    'layer': 3,
+    'iter': 3000,
     'r': 5,
     'zRatio': 27.693,
     'motion': 0,
     'mask_ref': 0,
     'mask_mov': 0,
-    'save_ite':2,
+    'save_ite':5,
     'movRange': 10 # larger the less penalized
 }
 
-frameJump=20000
-refLength=1
-refJump =40/frameJump
+frameJump=30000
+# frameJump=1
+refLength=5
+refJump =20/frameJump
 initialLength=5
 thresFactor=5
 smFactor=50
 maskRange=[5,500]
-smoothPenalty_raw=1e-4
+smoothPenalty_raw=1e-6
+tol=1e-5
 
-T=19000
-# idx = np.arange(0,T,frameJump)
-# print(f"idx is {idx}")
-# with nd2.ND2File(nd2_file) as f:
-#     dask_data=f.to_dask()[idx].compute()
-#     print(f"dask_data.shape is {dask_data.shape}")
-
-
-# tf.imwrite(tif_dir + f"demo_data.tif",dask_data[:,None].astype('float32'), imagej=True)
-
-reload(utils)
-reload(preprocess)
-reload(calFlow3d_Wei_v1)
-reload(wholistic_registration)
+T=30001
 
 slx = slice(350, 700)
 sly = slice(350, 700)
+slx = slice(None, None)
+sly = slice(None, None)
 
+# tRange=np.arange(0,T,frameJump)
+# print(f"tRange is {tRange}, length is {len(tRange)}")
+
+# with nd2.ND2File(nd2_file) as f:
+#     metadata=f.metadata
+#     channels=metadata.channels[0]
+#     #get Zratio
+#     axesCalibration=channels.volume.axesCalibration
+#     dask_data=f.to_dask()[:,1,sly,slx]
+#     data_ref = dask_data[tRange].compute()
+
+# metadata = {}
+# spacing_x = 1.0/axesCalibration[0]
+# spacing_y = 1.0/axesCalibration[1]    
+
+# with tf.TiffWriter(os.path.join(tif_dir, f'reference_data.ome.tif'), imagej=True) as tif:
+#     tif.write(data_ref[:,None,None], metadata=metadata, resolution=(1.0/spacing_x, 1.0/spacing_y))
+
+
+tRange=np.arange(frameJump,T,frameJump)
+print(f"tRange is {tRange}, length is {len(tRange)}")
 with nd2.ND2File(nd2_file) as f:
     metadata=f.metadata
     channels=metadata.channels[0]
-    
     #get Zratio
     axesCalibration=channels.volume.axesCalibration
     zRatio=axesCalibration[2]/axesCalibration[0]
     print("Z ratio is", zRatio)
     [X,Y,Z]=channels.volume.voxelCount
 
-    if slx is not None and sly is not None:
+    if slx.stop is not None and sly.stop is not None:
         X = slx.stop - slx.start
         Y = sly.stop - sly.start
     
@@ -85,8 +99,6 @@ with nd2.ND2File(nd2_file) as f:
     frames=metadata.contents.frameCount
     print("Total frames is",frames)
 
-    tRange=range(0,T,frameJump)
-    print(f"tRange is {tRange}, length is {len(tRange)}")
 
     #initial the var
     dat_channel2_raw = np.zeros([X,Y,Z,len(tRange)],dtype=np.int16)
@@ -95,7 +107,6 @@ with nd2.ND2File(nd2_file) as f:
     dat_refs = np.zeros([X,Y,Z, len(tRange)],dtype=np.int16)
 
     motion_history=np.zeros([X,Y,Z,3,initialLength],dtype=np.float32)
-    # option['motion']=np.zeros([X,Y,Z,len(tRange)])
     option['motion']=np.zeros([X,Y,Z,3])
 
     if Z>1:
@@ -106,8 +117,8 @@ with nd2.ND2File(nd2_file) as f:
         dask_data=f.to_dask()[:,1,sly,slx][:,None]
         Ca_data=f.to_dask()[:,0,slx,sly][:,None]
 
-
-    dat_ref=np.roll(dask_data[0].compute().transpose(2,1,0),10,axis=1).copy()
+    # dat_ref=np.roll(dask_data[0].compute().transpose(2,1,0),10,axis=1).copy()
+    dat_ref = dask_data[0].compute().transpose(2,1,0)
     print(f"dat_ref.shape is {dat_ref.shape}")
     # option['mask_ref']=mask.getMask(dat_ref,thresFactor)
     # option['mask_ref']=mask.bwareafilt3_wei(option['mask_ref'],maskRange)
@@ -118,7 +129,6 @@ with nd2.ND2File(nd2_file) as f:
 
     #start to registration
     for tCnt in range(len(tRange)):
-    # for tCnt in np.arange(1,2):
         t=tRange[tCnt]
         print(f"reading data... \n tCnt is {tCnt}, time point {t}")
         dat_mov=dask_data[t].compute().transpose(2,1,0)
@@ -126,65 +136,77 @@ with nd2.ND2File(nd2_file) as f:
         option['mask_mov']=np.full(dat_ref.shape,False,dtype=bool)
         # option['mask_mov']=mask.getMask(dat_ref,thresFactor)
         # option['mask_mov']=mask.bwareafilt3_wei(option['mask_mov'],maskRange)
-        print("generate reference...")
+        # print("generate reference...")
         # if (tCnt - 1) % refJump == 0:
-        #     if tCnt > refLength * refJump:
-        #         ref_range = np.arange(tCnt - refLength * refJump, tCnt, refJump)
-        #         print(f"ref_range is {ref_range}")
+        #     if tCnt > refJump:
+        #         refPossible = np.int32(np.min([tCnt//refJump, refLength]))
+        #         # print(f"refPossible is {refPossible}")
+        #         ref_range = np.arange(tCnt - refPossible * refJump, tCnt, refJump)
+        #         # print(f"ref_range is {ref_range}")
         #         # Compute median along time axis (axis=3 for 4D array)
         #         dat_ref = np.median(dat_channel2[:, :, :, ref_range], axis=3).astype(np.float32)
             
             # Generate and filter mask
             # option['mask_ref'] = mask.getMask(dat_ref, thresFactor)
             # option['mask_ref'] = mask.bwareafilt3_wei(option['mask_ref'], maskRange)
-
             
             # Update penalty factor
             # pnlt_factor = preprocess.getSmPnltNormFctr(dat_ref, option)
             # smoothPenalty=Pnltfactor*smoothPenalty_raw
-    
-        # print("calculating the motion")
-        # print(f"dat_ref.shape is {dat_ref.shape}")
-        # print(f"dat_mov.shape is {dat_mov.shape}")
-        # print(f"smoothPenalty is {smoothPenalty}")
-        # print(f"option is {option}")
-        # print(f"shape of option['motion'] is {option['motion'].shape}")
-        motion_current, currentError, coords_new, error_log = utils.calFlow3d_Wei_v1.getMotion(dat_mov,dat_ref,smoothPenalty,option)
+        verbose = True
+        motion_current, currentError, coords_new, error_log = utils.calFlow3d_Wei_v1.getMotion(dat_mov,dat_ref,smoothPenalty,option,tol=tol,verbose=verbose)
 
+        
         for ind, key in enumerate(list(error_log.keys())):
             ncorrections = len(error_log[key]['motion_current'])
             motions = np.array([mc for mc in error_log[key]['motion_current']])
             motions = motions.transpose(0,4,3,2,1).astype('float32')
-            corr_dat = np.array([mc for mc in error_log[key]['data_trans']])
-            # corr_dat = [utils.calFlow3d_Wei_v1.correctMotion(data_mov,mc) for mc in error_log[key]['motion_current']]
-            corr_dat = np.array(corr_dat)
-            data_mov = np.array(error_log[key]['data_mov'])
-            data_ref = np.array(error_log[key]['data_ref'])
+            if hasattr(error_log[key]['data_trans'][0], "get"):
+                corr_dat = np.array([mc.get() for mc in error_log[key]['data_trans']])
+                data_mov = np.array(error_log[key]['data_mov'].get())[None,:]
+                data_ref = np.array(error_log[key]['data_ref'].get())[None,:]                
+            else:
+                corr_dat = np.array([mc for mc in error_log[key]['data_trans']])
+                data_mov = np.array(error_log[key]['data_mov'])[None,:]
+                data_ref = np.array(error_log[key]['data_ref'])[None,:]
+            
+
             corr_dat = np.concatenate([data_mov,data_ref, corr_dat],axis=0)
             data_refs = np.repeat(data_ref,ncorrections+2,axis=0)
+
             corr_dat = corr_dat.transpose(0,3,2,1)[:,:,None].astype('float32')
             data_refs = data_refs.transpose(0,3,2,1)[:,:,None].astype('float32')
             corr_dat_refs = np.concatenate([corr_dat,data_refs],axis=2)
             metadata = {}
             spacing_x = 1.0/axesCalibration[0]
             spacing_y = 1.0/axesCalibration[1]
-            with tf.TiffWriter(os.path.join(tif_dir, f'registered_data_iterations_{key}.ome.tif'), imagej=True) as tif:
-                tif.write(corr_dat_refs, metadata=metadata, resolution=(1.0/spacing_x, 1.0/spacing_y))
-            with tf.TiffWriter(os.path.join(tif_dir, f'registered_motion_iterations_{key}.ome.tif'), imagej=True) as tif:
-                tif.write(motions, metadata=metadata, resolution=(1.0/spacing_x, 1.0/spacing_y))
-
+            # with tf.TiffWriter(os.path.join(tif_dir, f'registered_data_iterations_{t}_{key}.ome.tif'), imagej=True) as tif:
+            #     tif.write(corr_dat_refs, metadata=metadata, resolution=(1.0/spacing_x, 1.0/spacing_y))
+            # with tf.TiffWriter(os.path.join(tif_dir, f'registered_motion_iterations_{t}_{key}.ome.tif'), imagej=True) as tif:
+            #     tif.write(motions, metadata=metadata, resolution=(1.0/spacing_x, 1.0/spacing_y))
+print(f"Time taken: {(time() - t0)/60:.2f} minutes")
 #%%
+# check if the backend is Tkagg
+import matplotlib
 import matplotlib.pyplot as pl
-pl.figure()
-offset = 0
-for ind, key in enumerate(list(error_log.keys())):
-    xax = np.arange(len(error_log[key]['currentError'])) + offset
-    pl.plot(xax,error_log[key]['currentError'],'o-',label=key)
-    offset += len(xax)
-    pl.xlabel('Iteration')
-    pl.ylabel('Error')
-pl.legend()
-pl.savefig(os.path.join(save_dir, 'error_log.png'))
+print(matplotlib.get_backend())
+if matplotlib.get_backend() != 'TkAgg':
+    print("TkAgg is not the backend")
+    pl.figure()
+    offset = 0
+    for ind, key in enumerate(list(error_log.keys())):
+        xax = np.arange(len(error_log[key]['currentError'])) + offset
+        pl.plot(xax,error_log[key]['currentError'],'o-',label=key)
+        offset += len(xax)
+        pl.xlabel('Iteration')
+        pl.ylabel('Error')
+    pl.legend()
+    pl.savefig(os.path.join(save_dir, 'error_log.png'))
+else:
+    print("TkAgg is the backend")
+#%%
+
+
 
 
 #%%
