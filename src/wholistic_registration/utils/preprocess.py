@@ -1,4 +1,41 @@
+'''
+
+version : 0.1
+file name: preprocess.py
+
+Code Author : Wei Zheng for matlab and Yunfeng Chi (Tsinghua University) for python
+Last Update Date : 2025/8/05
+
+Overview:
+    This module provides functions for preprocessing 3D volumetric data, including normalization, smoothness penalty factor calculation, robust mean and standard deviation computation, and artificial motion generation. 
+
+functions:
+    - auto_contrast(img, low_percentile=3, high_percentile=97): Applies automatic contrast adjustment to an image based on specified percentiles.
+    - getSmPnltNormFctr(dat_ref, option): Calculates the smoothness penalty factor based on the gradients in the X and Y directions of the reference data.
+    - robust_mean_std(data, percentile=95): Computes the mean and standard deviation of the lowest specified percentile of pixel values in an image.
+    - normalize_to_255(img, lower_percentile=3, upper_percentile=99): Normalizes an image to the range [0, 255] based on specified percentiles.
+    - generate_artificial_motion(image, art_R, Amp_art, zRatio, noise_level): Generates artificial motion in a 3D image and applies Gaussian noise, returning both the moved and reference images along with the true motion field.
+    
+'''
 import numpy as np
+from scipy.ndimage import gaussian_filter
+import numpy as np
+from scipy.ndimage import gaussian_filter, map_coordinates
+
+def auto_contrast(img, low_percentile=3, high_percentile=97):
+    """
+    Applies automatic contrast adjustment to an image based on specified percentiles.
+    Parameters:
+        img (np.ndarray): Input image array.
+        low_percentile (float): Lower percentile for contrast stretching. Default is 3.
+        high_percentile (float): Upper percentile for contrast stretching. Default is 97.
+    Returns:
+        np.ndarray: Contrast-stretched image.
+    """
+    img = img.astype(np.float32)
+    p_low, p_high = np.percentile(img, [low_percentile, high_percentile])
+    img_clipped = np.clip(img, p_low, p_high)
+    return (img_clipped - p_low) / (p_high - p_low + 1e-8)
 
 def getSmPnltNormFctr(dat_ref, option):
     """
@@ -25,3 +62,110 @@ def getSmPnltNormFctr(dat_ref, option):
     # Return the average of the squared gradients in both directions
     factor = (Ix_squared + Iy_squared) / 2
     return factor
+
+
+def robust_mean_std(data, percentile=95):
+    """
+    Computes the mean and standard deviation of the lowest specified percentile of pixel values in an image.
+    Parameters:
+        data (np.ndarray): Input image array.
+        percentile (float): Percentile threshold to consider for mean and std calculation. Default is 95.
+    Returns:
+        mean (float): Mean of the pixel values below the specified percentile.
+        std (float): Standard deviation of the pixel values below the specified percentile.
+    """
+    data_flat = data.flatten()
+    threshold = np.percentile(data_flat, percentile)
+    mask = data_flat <= threshold
+    selected = data_flat[mask]
+    
+    return np.mean(selected), np.std(selected)
+
+def normalize_to_255(img,lower_percentile=3,upper_percentile=99):
+    """
+    Normalizes an image to the range [0, 255] based on specified percentiles.
+    Parameters:
+        img (np.ndarray): Input image array.
+        lower_percentile (float): Lower percentile for normalization. Default is 3.
+        upper_percentile (float): Upper percentile for normalization. Default is 99.
+    Returns:
+        norm_img.astype(np.ndarray): Normalized image in the range [0, 255].
+    """
+    lower = np.percentile(img, lower_percentile)
+    upper = np.percentile(img, upper_percentile)
+    
+    clipped = np.clip(img, lower, upper)
+    
+    norm_img = (clipped - lower) / (upper - lower + 1e-8) * 255
+    return norm_img.astype(np.float64)
+
+def generate_artificial_motion(image, art_R, Amp_art, zRatio, noise_level):
+    """
+    Generates artificial motion in a 3D image and applies Gaussian noise, returning both the moved and reference images along with the true motion field.
+
+    Parameters:
+        image (np.ndarray): The original 3D image data.
+        art_R (float): The radius for Gaussian smoothing of the motion field.
+        Amp_art (float): The amplitude of the artificial motion.
+        zRatio (float): The ratio of Z-axis spacing to X/Y-axis spacing.
+        noise_level (float): The standard deviation of the Gaussian noise to be added.
+
+    Returns:
+        dat_mov (np.ndarray): The moved image with artificial motion and noise.
+        dat_ref (np.ndarray): The reference image after applying the inverse motion and noise.
+        motion_current_real (np.ndarray): The true motion field applied to the image.
+    """
+    Y, X, Z = image.shape
+    N = X * Y * Z
+
+    # generate sparse coordinates for motion perturbation
+    ratio_art = 1.0 / ((2 * art_R + 1) ** 3)
+    L = int(round(N * ratio_art))
+    cp_art = np.random.choice(N, L, replace=False)
+    coords = np.unravel_index(cp_art, (Y, X, Z))
+
+    # generate sparse coordinates along with Gaussian smoothing
+    def generate_field():
+        field = np.zeros((Y, X, Z), dtype=np.float32)
+        field[coords] = np.random.randn(L)
+        return gaussian_filter(field, sigma=[art_R, art_R, art_R / zRatio])
+
+    motion_X = generate_field()
+    motion_Y = generate_field()
+    motion_Z = generate_field()
+
+    # normalize the motion field at the perturbation coordinates to have the specified amplitude
+    std_X = np.std(motion_X[coords])
+    std_Y = np.std(motion_Y[coords])
+    std_Z = np.std(motion_Z[coords])
+
+    motion_X = motion_X / std_X * Amp_art
+    motion_Y = motion_Y / std_Y * Amp_art
+    motion_Z = motion_Z / std_Z * Amp_art
+
+    # convert to the motion field with shape (Y, X, Z, 3)
+    motion_current_real = np.stack([motion_X, motion_Y, motion_Z], axis=-1)
+
+    # apply the motion to the image using interpolation
+    def apply_motion(img, motion):
+        #generate original grid coordinates
+        yy, xx, zz = np.meshgrid(
+            np.arange(Y), np.arange(X), np.arange(Z), indexing='ij'
+        )
+        coords_warped = np.array([
+            yy + motion[..., 1],
+            xx + motion[..., 0],
+            zz + motion[..., 2]
+        ])
+        # project the warped coordinates back to the original image space using interpolation
+        return map_coordinates(img, coords_warped, order=1, mode='nearest')
+
+    # Remind the motion: dat_mov is the result after adding motion (forward), while correctMotion_Wei is reverse sampling
+    dat_mov_raw = apply_motion(image, -motion_current_real)
+    dat_ref_raw = apply_motion(dat_mov_raw, motion_current_real)
+
+    # Add Gaussian noise to both moved and reference images
+    dat_mov = dat_mov_raw + np.random.randn(Y, X, Z) * noise_level
+    dat_ref = dat_ref_raw + np.random.randn(Y, X, Z) * noise_level
+
+    return dat_mov, dat_ref, motion_current_real
