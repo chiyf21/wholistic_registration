@@ -31,8 +31,16 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 from mpl_toolkits.mplot3d import Axes3D
+import os
 
-def visualize_2d_image(image, cmap='gray', title='2D Image',threshold=None):
+def auto_contrast(img, low_percentile=1, high_percentile=99):
+    img = img.astype(np.float32)
+    p_low, p_high = np.percentile(img, [low_percentile, high_percentile])
+    img_clipped = np.clip(img, p_low, p_high)
+    return (img_clipped - p_low) / (p_high - p_low + 1e-8)
+
+
+def visualize_2d_image(image, cmap='gray', title='2D Image',threshold=None,autocontrast=True,figsize=(8,8)):
     """
     Visualizes a single 2D image.
     
@@ -42,19 +50,27 @@ def visualize_2d_image(image, cmap='gray', title='2D Image',threshold=None):
         title (str): Title of the image plot.
     """
     if threshold is None:
-        plt.figure(figsize=(8, 8))
-        plt.imshow(image, cmap=cmap)
+        plt.figure(figsize=figsize)
+        if autocontrast:
+            plt.imshow(auto_contrast(image), cmap=cmap)
+        else:
+            plt.imshow(image, cmap=cmap)
+
         plt.title(title)
         plt.axis('off')  # Hide axes for a cleaner visualization
         plt.colorbar()
         plt.show()
     else:
-        plt.figure(figsize=(8, 8))
-        plt.imshow(image, cmap=cmap,vmin=threshold[0], vmax=threshold[1])
+        plt.figure(figsize=figsize)
+        if autocontrast:
+            plt.imshow(auto_contrast(image), cmap=cmap)
+        else:
+            plt.imshow(image, cmap=cmap)
         plt.title(title)
         plt.axis('off')  # Hide axes for a cleaner visualization
         plt.colorbar()
         plt.show()
+
 
 def visualize_3d_image(image, slice_axis=2, slice_index=None, cmap='gray', title='3D Image Slice'):
     """
@@ -86,31 +102,42 @@ def visualize_3d_image(image, slice_axis=2, slice_index=None, cmap='gray', title
     plt.colorbar()
     plt.show()
 
-def overlay_motion_on_2d(image, motion_field, quiver_scale=5, cmap='jet', title='Motion Overlay'):
+def quivermotion_py(template, r, motion_field, save_path=None, file_name=None):
     """
-    Overlays a motion field on a 2D image and displays the result.
+    Display and optionally save an image with an overlay of the motion field (similar to MATLAB's quivermotion_Chi).
     
-    Args:
-        image (ndarray): The 2D image to display.
-        motion_field (ndarray): A motion field with shape (height, width, 2), where the third dimension 
-                                 contains the motion vectors in x (u) and y (v).
-        quiver_scale (float): Scaling factor for the motion vectors.
-        cmap (str): The colormap to use for visualization.
-        title (str): Title of the image with motion overlay.
+    Parameters:
+        template (ndarray): Original image(H, W) or (H, W, C)
+        r (int): Subsampling step size
+        motion_field (ndarray): the flow or displacement field with shape (H, W, 2)
+        save_path (str): optional, directory to save the image
+        file_name (str): optional, name of the file to save the image (.png extension)
     """
+    H, W = template.shape[:2]
+    
+    # sample coordinates for quiver
+    x_indices = np.arange(r, W, 2*r + 1)
+    y_indices = np.arange(r, H, 2*r + 1)
+    x_sub, y_sub = np.meshgrid(x_indices, y_indices)
 
+    # extract u, v components (note the order [v, u])
+    u = motion_field[..., 0]
+    v = motion_field[..., 1]
+    u_sub = u[y_indices[:, None], x_indices]
+    v_sub = v[y_indices[:, None], x_indices]
+
+    # display the image with motion field overlay
     plt.figure(figsize=(8, 8))
-    plt.imshow(image, cmap=cmap)
-    plt.title(title)
+    plt.imshow(template, cmap='gray', origin='upper')
+    plt.quiver(x_sub, y_sub, u_sub, -v_sub, color='g', angles='xy', scale_units='xy', alpha=1,scale=0.7, linewidth=2.0)
+    plt.title("Motion Field Overlay on Image")
     plt.axis('off')
-    
-    u = motion_field[:, :, 0]  
-    v = motion_field[:, :, 1]  
-    
-    Y, X = np.meshgrid(np.arange(image.shape[0]), np.arange(image.shape[1]))
-    
-    plt.quiver(X, Y, u, v, color='g',scale=quiver_scale)
 
-    plt.colorbar(label='Motion Vector Magnitude')
+    # save the figure
+    if save_path and file_name:
+        os.makedirs(save_path, exist_ok=True)
+        save_file = os.path.join(save_path, file_name)
+        plt.savefig(save_file, dpi=300, bbox_inches='tight')
+        print(f"✅ Saved to: {save_file}")
+
     plt.show()
-
