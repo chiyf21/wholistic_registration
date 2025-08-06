@@ -19,9 +19,10 @@ def pick_initial_reference(frames: np.ndarray, max_corr_frames: int = 20):
     """
 
     nimg, Ly, Lx = frames.shape
-    frames = np.reshape(frames, (nimg, -1)).astype("float32") # Nimg x (Ly*Lx)
-    frames = frames - np.reshape(frames.mean(axis=1), (nimg, 1)) # Nimg x (Ly*Lx)
-    cc = np.matmul(frames, frames.T) # Nimg x Nimg
+    frames = np.reshape(frames, (nimg, -1)) # Nimg x (Ly*Lx)
+    frames_mean = frames.mean(axis=1)
+    frames_demeaned = frames - np.reshape(frames_mean, (nimg, 1)) # Nimg x (Ly*Lx)
+    cc = np.matmul(frames_demeaned, frames_demeaned.T) # Nimg x Nimg
     ndiag = np.sqrt(np.diag(cc)) # Nimg
     cc = cc / np.outer(ndiag, ndiag) # Nimg x Nimg
     CCsort = -np.sort(-cc, axis=1) # Nimg x Nimg
@@ -31,4 +32,4 @@ def pick_initial_reference(frames: np.ndarray, max_corr_frames: int = 20):
     indsort = np.argsort(-cc[imax, :])
     refImg = np.mean(frames[indsort[0:ncorr_frames], :], axis=0)
     refImg = np.reshape(refImg, (Ly, Lx))
-    return refImg
+    return refImg, indsort[0:ncorr_frames]
