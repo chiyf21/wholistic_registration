@@ -48,10 +48,7 @@ def imfilter(A, H, boundary='reflect', output='same', functionality='corr'):
     }
     boundary = mode_mapping.get(boundary, boundary)
     
-    # Flip the kernel for convolution
-    if functionality == 'conv':
-        H = cp.flip(H)
-    
+
     # Perform the operation
     if functionality == 'corr':
         result = correlate(A, H, mode=boundary)
