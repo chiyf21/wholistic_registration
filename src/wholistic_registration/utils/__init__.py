@@ -63,5 +63,9 @@ option={
     'motion':0,
     'mask_ref':0,
     'mask_mov':0,
-    'save_ite':100
+    'save_ite':100,
+    'thresFactor':5,
+    'mask_size_range':[5,500],
+    'smoothPenalty_raw':0.05,
+    'tol':1e-4
 }
