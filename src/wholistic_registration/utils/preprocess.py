@@ -21,6 +21,7 @@ import numpy as np
 from scipy.ndimage import gaussian_filter
 import numpy as np
 from scipy.ndimage import gaussian_filter, map_coordinates
+import scipy.ndimage as ndi
 
 def auto_contrast(img, low_percentile=3, high_percentile=97):
     """
@@ -169,3 +170,27 @@ def generate_artificial_motion(image, art_R, Amp_art, zRatio, noise_level):
     dat_ref = dat_ref_raw + np.random.randn(Y, X, Z) * noise_level
 
     return dat_mov, dat_ref, motion_current_real
+
+
+
+def michelson_edge_map(frame, sigma_xy=3, r=6, eps=1e-6):
+    # frame: (Y,X), float in [0,1]
+    # 1) denoise a bit
+    fs = ndi.gaussian_filter(frame, sigma=sigma_xy, mode="nearest")
+    # 2) gradients and unit normal
+    gx = ndi.sobel(fs, axis=-1, mode="nearest")
+    gy = ndi.sobel(fs, axis=-2, mode="nearest")
+    nrm = np.sqrt(gx*gx + gy*gy) + eps
+    ux, uy = gx/nrm, gy/nrm  # edge normal direction
+    # 3) sample intensities on two sides along the normal
+    H, W = frame.shape
+    y, x = np.mgrid[0:H, 0:W]
+    y_plus  = np.clip(y + r*uy, 0, H-1)
+    x_plus  = np.clip(x + r*ux, 0, W-1)
+    y_minus = np.clip(y - r*uy, 0, H-1)
+    x_minus = np.clip(x - r*ux, 0, W-1)
+    I_plus  = map_coordinates(fs, [y_plus,  x_plus],  order=1, mode="nearest")
+    I_minus = map_coordinates(fs, [y_minus, x_minus], order=1, mode="nearest")
+    # 4) Michelson-normalized edge strength (absolute value)
+    E = (I_plus - I_minus) / (I_plus + I_minus + eps)
+    return np.abs(E) 
