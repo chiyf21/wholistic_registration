@@ -141,7 +141,8 @@ def saveTiff(image_list, config_path, save_path):
     tifffile.imwrite(
         save_path,
         image_list,
-        description=config_str
+        description=config_str,
+        bigtiff=True
     )
 
 def readTifff(tiff_path):
