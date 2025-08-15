@@ -193,4 +193,12 @@ def michelson_edge_map(frame, sigma_xy=3, r=6, eps=1e-6):
     I_minus = map_coordinates(fs, [y_minus, x_minus], order=1, mode="nearest")
     # 4) Michelson-normalized edge strength (absolute value)
     E = (I_plus - I_minus) / (I_plus + I_minus + eps)
+
     return np.abs(E) 
+
+def normalize_std(mean,std, image:np.ndarray):
+    mean_prev=np.mean(image)
+    std_prev=np.std(image)
+    image_normalized=(image-mean_prev)/std_prev
+    image_corrected=image_normalized*std+mean
+    return image_corrected

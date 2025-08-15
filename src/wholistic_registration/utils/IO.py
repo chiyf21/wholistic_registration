@@ -105,3 +105,53 @@ def readFrame(filePath, frame, channel=0, to_memory=True):
             return frame_data[0]
         else:
             return np.stack(frame_data)
+
+
+def saveTiff(image_list, config_path, save_path):
+    """
+    Saves a list of image frames as a multi-page TIFF file and embeds configuration
+    data from a TOML file into the TIFF metadata.
+
+    Parameters:
+        image_list (list[np.ndarray]): A list where each element is a 2D or 3D NumPy array
+                                       representing one image frame (H, W) or (H, W, C).
+        config_path (str): Path to the TOML configuration file.
+        save_path (str): Path to save the resulting TIFF file.
+
+    Returns:
+        None
+
+    Notes:
+        - The content of the TOML file will be serialized into a JSON string and stored
+          in the TIFF ImageDescription tag for later retrieval.
+        - All images will be converted to uint8 before saving if they are not already.
+        - The function uses the tifffile library for writing multi-page TIFF files.
+    """
+    config_data = toml.load(config_path)
+
+    import json
+    config_str = json.dumps(config_data, ensure_ascii=False)
+
+    # check the list
+    for i, img in enumerate(image_list):
+        if not isinstance(img, np.ndarray):
+            raise ValueError(f"element{i} is not a image")
+
+
+    tifffile.imwrite(
+        save_path,
+        image_list,
+        description=config_str,
+        bigtiff=True
+    )
+
+def readTifff(tiff_path):
+    #haven't tested
+    import json
+
+    with tifffile.TiffFile(tiff_path) as tif:
+        images = [page.asarray() for page in tif.pages]
+        desc = tif.pages[0].tags["ImageDescription"].value
+        config = json.loads(desc)
+
+    return images, config

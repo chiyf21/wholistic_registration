@@ -1,0 +1,76 @@
+[channels]
+#Params:
+#   -dual_channel
+#       Whether use two channels to do registration
+#       If true,we will use the "membrane_channel+k*function(Ca_channel)" to do registration
+#   -function
+#       The method we process the Ca_channel.It can be "sqrt","log2","log10" or "raw"
+#       "sqrt": square root
+#       "log2": log2(1+x)
+#       "log10": log10(1+x)
+#       "raw": x
+#   -k
+#       The coefficient multiplied after the transformation of Ca channel data:
+#       the larger this value, the greater the proportion of the calcium channel, making it more susceptible to changes in the Ca channel.
+#Example:
+#   1.
+#       dual_channel=true
+#       function="raw"
+#       k=0.3
+#   2.
+#       dual_channel=true
+#       function="log10"
+#       k=300
+dual_channel=true
+function="log10"
+k=300
+
+[reference]
+#Params:
+#   -pick_reference_auto
+#       Whether pick the reference image from moving image
+#       If true, it will pick the reference image from the moving video each several frames
+#       If false, you need to give a reference image
+pick_reference_auto=true
+
+[preprocess]
+#Params:
+#   -normalize_to_0_255
+#       Whether normalize the image to [0,255]
+normalize_to_0_255=false
+
+[mask]
+#Params:
+#   -thresFactor
+#       The threshold value
+#       pixels greater than thresFactor times the standard deviation are regarded as outliers, and we will initially mask these points.
+#   -maskRange
+#       The pixel range of the mask region
+#       Only the pixels in the maskRange will be masked.
+#       Remark: This is the absolute value of the pixels, so it depends on the bit depth of the image's pixels. 
+#       For example, if yo image range is [0, 255], then your reasonable maskRange should be at least a subset of [0, 255]. 
+#       If you don't want to filter out any mask points, you can set this range to be very large.
+thresFactor=5
+maskRange=[5,4000]
+
+[pyramid]
+#Params:
+#   -layer
+#       The layer of pyramid
+#       A larger layer means that the algorithm is better at capturing large-scale displacements
+#       and correspondingly, its ability to capture some small deformations will be slightly diminished.
+#   -r
+#       The radius of the patch
+#       The size of each patch is (2r+1)*(2r+1), and each patch has one control point.
+#       A smaller r means more control points and more easier to capture noise
+#   -iter
+#       The num of maximum iterations of each layer
+#   -smoothPenalty
+#       The coefficient of the smoothness penalty term
+#       A larger smoothPenalty means more smooth motion we will get and correspondingly the error of intensity will increase
+layer=1
+r=5
+iter=10
+smoothPenalty=0.3
+
+
