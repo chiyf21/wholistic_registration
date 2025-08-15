@@ -311,7 +311,7 @@ def compute_new_grid(grid, r, motion_shape):
     return cp.stack([x_new, y_new, z_new], axis=0)  # Shape: (3, H, W, D)
 
 
-def getMotion(dat_mov, dat_ref, smoothPenalty_raw, option, verbose=False, tol=1e-4):
+def getMotion(dat_mov, dat_ref, option, verbose=False):
     """
     Function to compute motion correction using multi-scale approach.
 
@@ -354,7 +354,7 @@ def getMotion(dat_mov, dat_ref, smoothPenalty_raw, option, verbose=False, tol=1e
         error_log[f"layer_{layer}"]["penaltyError"] = []
         error_log[f"layer_{layer}"]["currentError"] = []
         error_log[f"layer_{layer}"]["motion_current"] = []
-        error_log[f"layer_{layer}"]["data_trans"] = []
+        error_log[f"layer_{layer}"]["data_mov_corrected"] = []
         error_log[f"layer_{layer}"]["max_diff_motion"] = []
         
 
@@ -367,17 +367,17 @@ def getMotion(dat_mov, dat_ref, smoothPenalty_raw, option, verbose=False, tol=1e
         z = SZ[2]  # Keep original depth
 
         # Downsample images to current pyramid level
-        data1 = imresize(
+        data_mov_layer = imresize(
             cp.asarray(dat_mov), output_shape=(x, y, z)
         )  # Shape: (x, y, z) # bicubic by default
-        data2 = imresize(
+        data_reference_layer = imresize(
             cp.asarray(dat_ref), output_shape=(x, y, z)
         )  # Shape: (x, y, z)
-        error_log[f"layer_{layer}"]["data_ref"] = data2
-        error_log[f"layer_{layer}"]["data_mov"] = data1
+        error_log[f"layer_{layer}"]["data_ref"] = data_reference_layer
+        error_log[f"layer_{layer}"]["data_mov"] = data_mov_layer
 
         # Update dimensions after downsampling
-        x, y, z = data1.shape  # Updated dimensions for current level
+        x, y, z = data_mov_layer.shape  # Updated dimensions for current level
 
         # Scale z-ratio for current pyramid level
         zRatio = zRatio_raw / (2**layer)
@@ -451,7 +451,7 @@ def getMotion(dat_mov, dat_ref, smoothPenalty_raw, option, verbose=False, tol=1e
         # Generate coordinate grid for current level
         grid = cp.meshgrid(
             *[
-                cp.arange(n, dtype=cp.float32) for n in data1.shape
+                cp.arange(n, dtype=cp.float32) for n in data_mov_layer.shape
             ],  # Create coordinate arrays
             indexing="ij",  # Use matrix indexing (row, column)
             sparse=False,  # Return full grid
@@ -469,7 +469,7 @@ def getMotion(dat_mov, dat_ref, smoothPenalty_raw, option, verbose=False, tol=1e
         oldError = cp.inf * cp.ones(3)  # Shape: (3,) - track last 3 errors
 
         # Set up penalty parameters
-        smoothPenalty = smoothPenalty_raw  # Smoothness penalty weight
+        smoothPenalty = option["smoothPenalty"]  # Smoothness penalty weight
         patchConnectNum = (r * 2 + 1) ** 2  # Number of connected patches
         smoothPenaltySum = smoothPenalty * patchConnectNum  # Total penalty weight
 
@@ -486,11 +486,11 @@ def getMotion(dat_mov, dat_ref, smoothPenalty_raw, option, verbose=False, tol=1e
             old_motion = motion_current.copy()
             # Apply current motion field to get warped moving image
             coords_new = interp.correctGrid(motion_current, grid)  # Shape: (x, y, z, 3) # add grid coordinates to motion
-            data1_tran = correctMotionGrid(data1, coords_new)  # Shape: (x, y, z) # get data1 at new coordinates/motion control points
+            data_mov_corrected = correctMotionGrid(data_mov_layer, coords_new)  # Shape: (x, y, z) # get data1 at new coordinates/motion control points
             
             # Save motion field periodically for logging
             if iter % option["save_ite"] == 0:
-                error_log[f"layer_{layer}"]["data_trans"].append(data1_tran)
+                error_log[f"layer_{layer}"]["data_mov_corrected"].append(data_mov_corrected)
                 if hasattr(motion_current, "get"):
                     error_log[f"layer_{layer}"]["motion_current"].append(
                         cp.asnumpy(motion_current).copy()
@@ -507,7 +507,7 @@ def getMotion(dat_mov, dat_ref, smoothPenalty_raw, option, verbose=False, tol=1e
             mask = mask_mov_current | mask_ref  # Shape: (x, y, z) - combined mask
 
             # Compute temporal difference between reference and warped moving image
-            It = data2 - data1_tran  # Shape: (x, y, z) # temporal difference
+            It = data_reference_layer - data_mov_corrected  # Shape: (x, y, z) # temporal difference
 
             # Apply spatial smoothing to temporal difference
             It = calculate.imfilter(
@@ -554,7 +554,7 @@ def getMotion(dat_mov, dat_ref, smoothPenalty_raw, option, verbose=False, tol=1e
             elif cp.sum(oldError <= currentError) > 1:
                 print("Error increased for multiple iterations")
                 break
-            elif np.abs(oldError[-1] - currentError) < tol:
+            elif np.abs(oldError[-1] - currentError) < option["tol"]:
                 print("Absolute difference between old and new error is less than 1e-3")
                 break
             else:
@@ -564,8 +564,8 @@ def getMotion(dat_mov, dat_ref, smoothPenalty_raw, option, verbose=False, tol=1e
 
             # Compute spatial gradients of the moving image at deformed coordinates
             Ix, Iy, Iz = getSpatialGradientInOrgGrid(
-                data1, coords_new
-            )  # Each shape: (x, y, z)
+                data_mov_layer, coords_new
+            )  # Each shape: (x, y, z) # dimensionality of the data
 
             # Zero out masked regions in gradients
             Ix[mask] = 0  # Shape: (x, y, z)
@@ -580,7 +580,7 @@ def getMotion(dat_mov, dat_ref, smoothPenalty_raw, option, verbose=False, tol=1e
                 (r * 2 + 1, r * 2 + 1, 1)
             )  # Shape: (2*r+1, 2*r+1, 1)
 
-            # Compute all components of the structure tensor
+            # Compute all components of the structure tensor and smooth
             Ixx = calculate.imfilter(
                 Ix**2, AverageFilter, "replicate", "same", "corr"
             )  # Shape: (x, y, z)
@@ -696,7 +696,7 @@ def getMotion(dat_mov, dat_ref, smoothPenalty_raw, option, verbose=False, tol=1e
     # Generate final coordinate grid
     grid = cp.meshgrid(
         *[
-            cp.arange(n, dtype=cp.float32) for n in data1.shape
+            cp.arange(n, dtype=cp.float32) for n in data_mov_layer.shape
         ],  # Create coordinate arrays
         indexing="ij",  # Use matrix indexing
         sparse=False,  # Return full grid
