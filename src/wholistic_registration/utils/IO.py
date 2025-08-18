@@ -17,6 +17,10 @@ functions:
 '''
 import nd2
 import numpy as np
+import toml
+import tifffile
+import json
+import zarr
 
 def readMeta(filePath,Ifprint=True):
     """
@@ -144,7 +148,111 @@ def saveTiff(image_list, config_path, save_path):
         description=config_str,
         bigtiff=True
     )
+def saveZarr(mem_data, ca_data, reference, config_path, save_path,
+             chunks=(1, 512, 512)):
+    """
+    Save membrane channel, calcium channel, and reference image into one Zarr store.
 
+    Parameters:
+        mem_data (np.ndarray): Membrane channel data, shape (T, H, W) or (T, H, W, C).
+        ca_data  (np.ndarray): Calcium channel data, shape (T, H, W) or (T, H, W, C).
+        reference (np.ndarray): Reference image (2D).
+        config_path (str): Path to the TOML configuration file.
+        save_path (str): Path to save the resulting Zarr dataset (directory).
+        chunks (tuple): Chunk size for Zarr storage, default (1, 512, 512).
+
+    Returns:
+        None
+
+    """
+    config_data = toml.load(config_path)
+    config_str = json.dumps(config_data, ensure_ascii=False)
+
+    # ensure numpy array
+    mem_data = np.asarray(mem_data)
+    ca_data = np.asarray(ca_data)
+    reference = np.asarray(reference)
+
+    # ensure dtype
+    if mem_data.dtype != np.uint8:
+        mem_data = mem_data.astype(np.uint8)
+    if ca_data.dtype != np.uint8:
+        ca_data = ca_data.astype(np.uint8)
+    if reference.dtype != np.uint8:
+        reference = reference.astype(np.uint8)
+
+    # open zarr root
+    root = zarr.open(save_path, mode='w')
+
+    # create datasets
+    root.create_dataset("membrane", data=mem_data, chunks=chunks, overwrite=True)
+    root.create_dataset("calcium", data=ca_data, chunks=chunks, overwrite=True)
+    root.create_dataset("reference", data=reference, overwrite=True)  # usually 2D, so no chunks needed
+
+    # save config
+    root.attrs["config"] = config_str
+
+    print(f"Saved Zarr dataset at {save_path}")
+    print(f"  - membrane: {mem_data.shape}")
+    print(f"  - calcium : {ca_data.shape}")
+    print(f"  - reference: {reference.shape}")
+
+def saveZarr_fast(mem_data, ca_data, reference, config_path, save_path,
+                  chunks=(16, 512, 512), compressor=None, single_file=False):
+    """
+    Fast Zarr saving for membrane, calcium and reference data.
+
+    Parameters:
+        mem_data (np.ndarray): Membrane channel, shape (T,H,W) or (T,H,W,C)
+        ca_data (np.ndarray): Calcium channel, shape (T,H,W) or (T,H,W,C)
+        reference (np.ndarray): Reference image, shape (H,W)
+        config_path (str): TOML configuration file path
+        save_path (str): Output Zarr directory or file (if single_file=True)
+        chunks (tuple): Chunk size for Zarr
+        compressor: Zarr compressor (default: fast Blosc zstd)
+        single_file (bool): Whether to save as single file (ZipStore)
+
+    Returns:
+        None
+    """
+    import zarr
+    import json
+    import toml
+    from numcodecs import Blosc
+
+    # default compressor
+    if compressor is None:
+        compressor = Blosc(cname='zstd', clevel=1, shuffle=Blosc.BITSHUFFLE)
+
+    # load config
+    config_data = toml.load(config_path)
+    config_str = json.dumps(config_data, ensure_ascii=False)
+
+    # switch to numpy
+    mem_data = np.asarray(mem_data, dtype=np.uint8)
+    ca_data  = np.asarray(ca_data, dtype=np.uint8)
+    reference = np.asarray(reference, dtype=np.uint8)
+
+    # open Zarr store
+    if single_file:
+        store = zarr.ZipStore(save_path + ".zip", mode='w')
+    else:
+        store = save_path  
+    root = zarr.open(store, mode='w')
+
+    # create datasets
+    root.create_dataset("membrane", data=mem_data, chunks=chunks, compressor=compressor, overwrite=True)
+    root.create_dataset("calcium", data=ca_data, chunks=chunks, compressor=compressor, overwrite=True)
+    root.create_dataset("reference", data=reference, compressor=compressor, overwrite=True)
+
+    # save config
+    root.attrs["config"] = config_str
+
+    print(f"Saved fast Zarr at {save_path}")
+    print(f"  - membrane: {mem_data.shape}")
+    print(f"  - calcium : {ca_data.shape}")
+    print(f"  - reference: {reference.shape}")
+                      
 def readTifff(tiff_path):
     #haven't tested
     import json
