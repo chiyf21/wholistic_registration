@@ -169,17 +169,11 @@ def saveZarr(mem_data, ca_data, reference, config_path, save_path,
     config_str = json.dumps(config_data, ensure_ascii=False)
 
     # ensure numpy array
-    mem_data = np.asarray(mem_data)
-    ca_data = np.asarray(ca_data)
-    reference = np.asarray(reference)
+    mem_data = np.asarray(mem_data,dtype=np.float32)
+    ca_data = np.asarray(ca_data,dtype=np.float32)
+    reference = np.asarray(reference,dtype=np.float32)
 
-    # ensure dtype
-    if mem_data.dtype != np.uint8:
-        mem_data = mem_data.astype(np.uint8)
-    if ca_data.dtype != np.uint8:
-        ca_data = ca_data.astype(np.uint8)
-    if reference.dtype != np.uint8:
-        reference = reference.astype(np.uint8)
+
 
     # open zarr root
     root = zarr.open(save_path, mode='w')
@@ -229,9 +223,9 @@ def saveZarr_fast(mem_data, ca_data, reference, config_path, save_path,
     config_str = json.dumps(config_data, ensure_ascii=False)
 
     # switch to numpy
-    mem_data = np.asarray(mem_data, dtype=np.uint8)
-    ca_data  = np.asarray(ca_data, dtype=np.uint8)
-    reference = np.asarray(reference, dtype=np.uint8)
+    mem_data = np.asarray(mem_data, dtype=np.float32)
+    ca_data  = np.asarray(ca_data,dtype=np.float32)
+    reference = np.asarray(reference,dtype=np.float32)
 
     # open Zarr store
     if single_file:
