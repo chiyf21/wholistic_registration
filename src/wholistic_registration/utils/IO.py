@@ -51,6 +51,11 @@ def readMeta(filePath,Ifprint=True):
 
     return metadata
 
+def getTotalFrames(filePath):
+    with nd2.ND2File(filePath) as f:
+        frame=f.sizes['T']
+    return frame
+
 
 def readFrame(filePath, frame, channel=0, to_memory=True):
     """
