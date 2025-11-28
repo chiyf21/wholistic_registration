@@ -3,8 +3,8 @@
 - Define data path
 - Extract metadata from data (pixel resolution, frame rate, data type)
 - Convert data to necessary format (if needed)
-- Define registration parameters
-- Save registration parameters to metafile (along with metadatat of data)
+- Define registration parameters (this should include the version of the code used)
+- Save registration parameters to metafile (along with metadata of data)
 - Load these parameters from save file 
 - Run registration (ideally there should be an estimate of CPU/GPU resources needed based on data volume)
 - If there are multiple references, save references into one tif file to inspect visually for drift
