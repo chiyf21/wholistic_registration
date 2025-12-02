@@ -42,78 +42,103 @@ def readMeta(filePath,Ifprint=True):
             axesCalibration=channels.volume.axesCalibration
             zRatio=axesCalibration[2]/axesCalibration[0]
             print("Z ratio is", zRatio)
-
             #get size
             print("Data size is",channels.volume.voxelCount)
-
             #get total frames
             print("Total frames is",f.sizes['T'])
 
     return metadata
-
+    
+def get_framerate(filePath):
+    with nd2.ND2File(filePath) as f:
+        t0 = f.frame_metadata(0).channels[0].time.relativeTimeMs
+        t1 = f.frame_metadata(1).channels[0].time.relativeTimeMs
+        dt_ms = t1 - t0
+        if dt_ms <= 0:
+            raise ValueError("Invalid timestamps: Δt <= 0")
+        framerate = 1000.0 / dt_ms  
+        return framerate, dt_ms
+        
 def getTotalFrames(filePath):
     with nd2.ND2File(filePath) as f:
         frame=f.sizes['T']
     return frame
 
 
-def readFrame(filePath, frame, channel=0, to_memory=True):
+def readFrame(filePath, frame, slices=None, channel=0, xy_down=1, to_memory=True):
     """
-    Reads specified frames from an ND2 file, supporting both single and multiple frame requests, and handles 5D data structures.
-
-    Parameters:
-        filePath (str): Path to the ND2 file.
-        frame (int or list/array): Frame index or indices to read. If an integer, reads a single frame; if a list/array, reads multiple frames.
-        channel (int): Channel index to read, default is 0.
-        to_memory (bool): Whether to load data into memory. Default is True.
-
-    Returns:
-        frame_data(np.ndarray): If a single frame is requested, returns the data for that frame. If multiple frames are requested, returns an array containing all requested frames.
-    
+    ND2 reader with high-quality XY downsampling:
+      - Z slice selection (via `slices`)
+      - XY resampling using skimage.resize with anti-aliasing
     """
+
     with nd2.ND2File(filePath) as f:
         sizes = f.sizes
         dims = list(sizes.keys())
-        
-        # Check if the data is 5D (T, Z, C, Y, X)
         is_5d = len(dims) == 5
-        
-        # Ensure frame is iterable; if it’s a single frame, convert it to a list
+
+        # Normalize frame list
         if isinstance(frame, (int, np.integer)):
             frames_to_read = [frame]
             is_single_frame = True
         else:
             frames_to_read = list(frame)
             is_single_frame = False
-        
-        # Initialize a list to hold the data for each frame
+
         frame_data = []
-        
+
         for t in frames_to_read:
-            # Check if the frame index is within the valid range
-            if t < 0 or t >= sizes['T']:
-                raise ValueError(f"Time error")
-            
-            # read the data according to the data structure
+            if t < 0 or t >= sizes["T"]:
+                raise ValueError("Time error")
+
+            # ------------------------------------
+            # Read ND2 data (lazy dask tensor)
+            # ------------------------------------
             if is_5d:
-                # if 5D structure: T,Z,C,Y,X; read the data from Z dimension
-                data = f.to_dask()[t, :, channel, :, :].transpose(1,2,0)
+                # 5D: T, Z, C, Y, X
+                if slices is None:
+                    dask_data = f.to_dask()[t, :, channel, :, :]
+                else:
+                    dask_data = f.to_dask()[t, slices, channel, :, :]
+
+                # Transpose Z,Y,X → Y,X,Z
+                dask_data = dask_data.transpose(1, 2, 0)
+
             else:
-                # if 4D structure: T,C,Y,X; read the data from T dimension
-                data = f.to_dask()[t, channel, :, :]
-            
-            # if needed, record the data to memory
-            if to_memory:
-                data = data.compute()
-            
+                # 4D: T, C, Y, X
+                if slices is not None:
+                    raise ValueError("4D data has no Z, cannot use slices")
+                dask_data = f.to_dask()[t, channel, :, :]
+                dask_data = dask_data[..., None]  # Y,X,1
+
+            # Convert to numpy
+            data = dask_data.compute() if to_memory else dask_data
+
+            # ------------------------------------
+            # High-quality XY downsample
+            # ------------------------------------
+            if xy_down > 1:
+                Y, X, Z = data.shape
+                newY = Y // xy_down
+                newX = X // xy_down
+
+                # skimage resize supports 3D tensors
+                data = resize(
+                    data,
+                    (newY, newX, Z),
+                    order=1,             # 1=bilinear, 3=bicubic
+                    anti_aliasing=True,
+                    preserve_range=True,
+                ).astype(np.float32)
+            else:
+                data = data.astype(np.float32)
+
             frame_data.append(data)
-        
-        # if only one frame is requested, return the single frame data
-        # otherwise, stack the frames into a single array
+
         if is_single_frame:
             return frame_data[0]
         else:
-            return np.stack(frame_data)
+            return np.stack(frame_data, axis=0)    
 
 
 def saveTiff(image_list, config_path, save_path):
