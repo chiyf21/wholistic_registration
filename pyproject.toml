@@ -12,6 +12,10 @@ dependencies = [
     "scipy",
     "matplotlib",
     "tifffile",
+    "nd2",
+    "toml",
+    "zarr",
+    "json",
 ] 
 
 [project.optional-dependencies]
