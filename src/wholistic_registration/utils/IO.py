@@ -49,6 +49,89 @@ def readMeta(filePath,Ifprint=True):
 
     return metadata
     
+
+def readMeta_new(filePath,Ifprint=True):
+    """
+    Reads metadata from an ND2 file and optionally prints Z ratio and data size.
+
+    Parameters:
+        filePath (str): Path to the ND2 file.
+        Ifprint (bool): Whether to print Z ratio and data size. Default is True.
+
+    Returns:
+        metadata (nd2.Metadata): Metadata object containing information about the ND2 file.
+
+    """
+    with nd2.ND2File(filePath) as ndf:
+        if hasattr(ndf.metadata, "channels"):
+            resolutionxyz = ndf.metadata.channels[0].volume.axesCalibration
+            spacing_x = resolutionxyz[0]
+            spacing_y = resolutionxyz[1]
+            
+            nchannels = len(ndf.metadata.channels)
+            voxelCount = ndf.metadata.channels[0].volume.voxelCount
+            nframes = ndf.shape[0]
+            
+            nxpix = voxelCount[0]
+            nypix = voxelCount[1]
+            if len(voxelCount) > 2:
+                nzpix = voxelCount[2]
+                spacing_z = resolutionxyz[2]
+                zRatio = spacing_z/spacing_x
+                
+            else:
+                spacing_z = 1
+                zRatio = 1
+                nzpix = 1
+
+
+        metadata=ndf.metadata
+        channels=metadata.channels[0]
+
+        try:
+            avgdiff = ndf.experiment[0].parameters.periodDiff.avg/1000
+            framerate = 1 / avgdiff
+        except:
+            t0 = ndf.frame_metadata(0).channels[0].time.relativeTimeMs
+            t1 = ndf.frame_metadata(1).channels[0].time.relativeTimeMs
+            dt_ms = t1 - t0
+            if dt_ms <= 0:
+                raise ValueError("Invalid timestamps: Δt <= 0")
+            framerate = 1000.0 / dt_ms 
+
+        if Ifprint:
+            #get Zratio
+            zRatio=spacing_z/spacing_x
+            print("Z ratio is", zRatio)
+            #get size
+            print("Data size is",[nxpix,nypix,nzpix])
+            #get total frames
+            print("Total frames is",ndf.sizes['T'])
+
+
+    metadata_dict = { # needed for ImageJ
+    'Pixels': {
+        'PhysicalSizeX': spacing_x,
+        'PhysicalSizeXUnit': 'um',
+        'PhysicalSizeY': spacing_y,
+        'PhysicalSizeYUnit': 'um',
+        'PhysicalSizeZ': spacing_z,
+        'PhysicalSizeZUnit': 'um',
+    },
+    'loop': True,
+    'fps': framerate,
+    'zRatio': zRatio,
+    'nframes': nframes,
+    'nchannels': nchannels,
+    'resolutionxyz': resolutionxyz,
+    'data_shape': voxelCount,
+    'spacing_x': spacing_x,
+    'spacing_y': spacing_y,
+    'spacing_z': spacing_z,
+    }
+
+    return metadata_dict
+
 def get_framerate(filePath):
     with nd2.ND2File(filePath) as f:
         t0 = f.frame_metadata(0).channels[0].time.relativeTimeMs
@@ -178,6 +261,27 @@ def saveTiff(image_list, config_path, save_path):
         description=config_str,
         bigtiff=True
     )
+
+def saveTiff_new(image, config_path, metadata, save_path, verbose=True): 
+
+    import json
+    config_data = toml.load(config_path)
+    config_str = json.dumps(config_data, ensure_ascii=False)  
+
+    spacing_x = metadata['spacing_x']
+    spacing_y = metadata['spacing_y']
+
+    if verbose:
+        print(f"Saving TIFF file to {save_path}")
+        print(f"  - shape: {image.shape}")
+        print(f"  - spacing: {spacing_x}, {spacing_y}")
+        print(f"  - config: {config_str}")
+
+    with tifffile.TiffWriter(save_path, imagej=True) as tif:
+        tif.write(image, metadata=metadata, resolution=(1.0/spacing_x, 1.0/spacing_y), description=config_str)
+
+
+    
 def saveZarr(mem_data, ca_data, reference, config_path, save_path,
              chunks=(1, 512, 512)):
     """
