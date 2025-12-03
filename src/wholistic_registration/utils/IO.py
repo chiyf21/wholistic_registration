@@ -154,6 +154,8 @@ def readFrame(filePath, frame, slices=None, channel=0, xy_down=1, to_memory=True
       - Z slice selection (via `slices`)
       - XY resampling using skimage.resize with anti-aliasing
     """
+    from skimage.transform import resize
+    
 
     with nd2.ND2File(filePath) as f:
         sizes = f.sizes
