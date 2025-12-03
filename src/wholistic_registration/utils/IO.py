@@ -3,7 +3,7 @@
 version : 0.1
 file name: IO.py
 
-Code Author : Wei Zheng for matlab and Yunfeng Chi (Tsinghua University) for python
+Code Author : Wei Zheng for matlab and Yunfeng Chi (Tsinghua University) and Virginia Ruetten (Janelia) for python
 Last Update Date : 2025/8/05
 
 Overview:
@@ -257,37 +257,23 @@ def readND2Frame(filePath, frames, slices=None, channel=0, xy_down=1, to_memory=
         # XY downsample using binning/averaging (dask-native)
         # ------------------------------------
         if xy_down > 1:
-            import dask.array as da
-            
-            # Use dask's built-in block reduction for true binning
-            # This reshapes and averages without forcing computation
-            T, Z, C, Y, X = dask_data.shape
-            
-            # Ensure dimensions are divisible by xy_down
-            newY = (Y // xy_down) * xy_down
-            newX = (X // xy_down) * xy_down
-            
-            # Trim to make dimensions divisible
-            if newY != Y or newX != X:
-                dask_data = dask_data[:, :, :, :newY, :newX]
-            
-            # Reshape to create blocks for averaging
-            # (T, Z, C, Y, X) -> (T, Z, C, Y//xy_down, xy_down, X//xy_down, xy_down)
-            reshaped = dask_data.reshape(
-                T, Z, C, 
-                newY // xy_down, xy_down,
-                newX // xy_down, xy_down
-            )
-            
-            # Average over the xy_down dimensions (axes 4 and 6)
-            dask_data = reshaped.mean(axis=(4, 6))
+            print(f"Downsampling data by {xy_down}x")
+            dask_data = downsample(dask_data, xy_down)
 
         # Only compute at the very end if requested
-        data = dask_data.compute() if to_memory else dask_data
+        data = dask_data.compute().astype(np.float32) if to_memory else dask_data
 
 
         return data   
 
+def downsample(data_tzcyx, xy_down=4):
+    T, Z, C, Y, X = data_tzcyx.shape
+    newY = (Y // xy_down) * xy_down
+    newX = (X // xy_down) * xy_down
+    data_tzcyx = data_tzcyx[:, :, :, :newY, :newX]
+    data_tzcyx = data_tzcyx.reshape(T, Z, C, newY // xy_down, xy_down, newX // xy_down, xy_down)
+    data_tzcyx = data_tzcyx.mean(axis=(4, 6))
+    return data_tzcyx
 
 def saveTiff(image_list, config_path, save_path):
     """
@@ -327,22 +313,32 @@ def saveTiff(image_list, config_path, save_path):
         bigtiff=True
     )
 
-def saveTiff_new(image, config_path, metadata, save_path, verbose=True):
+def saveTiff_new(image, save_path, config_path =None, metadata = None, verbose=True):
     # check dimension of image - should always by TZCYX
     if image.ndim == 2:
         image = image[None, None, None, :, :]
     if image.ndim != 5:
         raise ValueError("All saved should be 5D (TZCYX)")
 
-    
+    config_str = None
+    # if config_path is not None:
+    #     import json
+    #     config_data = toml.load(config_path)
+    #     config_str = json.dumps(config_data, ensure_ascii=False)
+    # else:
+    #     config_str = None
 
-    import json
-    config_data = toml.load(config_path)
-    config_str = json.dumps(config_data, ensure_ascii=False)  
-
-    spacing_x = metadata['spacing_x']
-    spacing_y = metadata['spacing_y']
-    metadata['data_shape'] = image.shape
+    if metadata is not None:
+        spacing_x = metadata['spacing_x']
+        spacing_y = metadata['spacing_y']
+        metadata['data_shape'] = image.shape
+    else:
+        metadata = {}
+        spacing_x = 1
+        spacing_y = 1
+        metadata['spacing_x'] = spacing_x
+        metadata['spacing_y'] = spacing_y
+        metadata['data_shape'] = image.shape
 
     if verbose:
         print(f"Saving TIFF file to {save_path}")
