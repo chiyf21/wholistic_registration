@@ -1,10 +1,10 @@
-from utils import IO,reference,registration
+from ..utils import IO, reference, registration
 import zarr
 import toml
 import numpy as np
 from skimage.transform import resize
 from numcodecs import Blosc
-from utils.reliableAnalysis import get_reliable_mask, get_spatial_mask, get_temporal_and_accumula_mask
+from ..utils.reliableAnalysis import get_reliable_mask, get_spatial_mask, get_temporal_and_accumula_mask
 import  os
 
 def DefineParams(
@@ -112,24 +112,31 @@ def DefineParams(
     ## read the metadata
     print("Reading meta data")
     if inputFile is not None:
-        meta=IO.readMeta(inputFile,Ifprint=verbose)
-        channels=meta.channels[0]
-        axesCalibration=channels.volume.axesCalibration
-        zRatio=axesCalibration[2]/axesCalibration[0]
-        data_size=channels.volume.voxelCount
-        frames=IO.getTotalFrames(inputFile)
-        frames_rate,_=IO.get_framerate(inputFile)
+        meta=IO.readMeta_new(inputFile,Ifprint=verbose)
+        nchannels=meta['nchannels']
+        nframes=meta['nframes']
+        data_shape=meta['data_shape']
+        resolutionxyz=meta['resolutionxyz']
+        spacing_x=meta['spacing_x']
+        spacing_y=meta['spacing_y']
+        spacing_z=meta['spacing_z']
+        framerate=meta['fps']
+        zRatio=meta['zRatio']
+
     print("Saving the config")
     ## load the default config file
-    config=toml.load('./configs/config_default.toml')
+    import os
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    config_path = os.path.join(os.path.dirname(current_dir), 'configs', 'config_default.toml')
+    config=toml.load(config_path)
 
     #change the meta data 
     config['MetaData']['zRatio']=zRatio
-    config['MetaData']['SIZE']=data_size
-    config['MetaData']['frames']=frames
-    config['MetaData']['Dim']=len(data_size)
-    config['MetaData']['voxelsize']=meta.channels[0].volume.axesCalibration
-    config['MetaData']['frame_rate']=frames_rate
+    config['MetaData']['SIZE']=data_shape
+    config['MetaData']['frames']=nframes
+    config['MetaData']['Dim']=len(data_shape)
+    config['MetaData']['voxelsize']=resolutionxyz
+    config['MetaData']['frame_rate']=framerate
 
     #change the downsample config
     config['downsample']['downsampleXY']=downsampleXY
