@@ -63,6 +63,9 @@ def readMeta_new(filePath,Ifprint=True):
 
     """
     with nd2.ND2File(filePath) as ndf:
+        data = ndf.to_dask()
+        data_shape = data.shape
+
         if hasattr(ndf.metadata, "channels"):
             resolutionxyz = ndf.metadata.channels[0].volume.axesCalibration
             spacing_x = resolutionxyz[0]
@@ -87,6 +90,10 @@ def readMeta_new(filePath,Ifprint=True):
 
         metadata=ndf.metadata
         channels=metadata.channels[0]
+
+        multichannel = True if nchannels > 1 else False
+        multiz = True if nzpix > 1 else False
+        multiframe = True if nframes > 1 else False
 
         try:
             avgdiff = ndf.experiment[0].parameters.periodDiff.avg/1000
@@ -124,10 +131,22 @@ def readMeta_new(filePath,Ifprint=True):
     'nframes': nframes,
     'nchannels': nchannels,
     'resolutionxyz': resolutionxyz,
-    'data_shape': voxelCount,
+    'data_shape': data_shape,
     'spacing_x': spacing_x,
     'spacing_y': spacing_y,
     'spacing_z': spacing_z,
+    'axes': 'TZCYX',
+    'SizeC': nchannels,
+    'SizeT': nframes,
+    'SizeZ': nzpix,
+    'SizeX': nxpix,
+    'SizeY': nypix,
+    'multichannel': multichannel,
+    'multiz': multiz,
+    'multiframe': multiframe,
+    'nzpix': nzpix,
+    'nxpix': nxpix,
+    'nypix': nypix,
     }
 
     return metadata_dict
@@ -148,82 +167,126 @@ def getTotalFrames(filePath):
     return frame
 
 
-def readFrame(filePath, frame, slices=None, channel=0, xy_down=1, to_memory=True):
+def readND2Frame(filePath, frames, slices=None, channel=0, xy_down=1, to_memory=True):
     """
     ND2 reader with high-quality XY downsampling:
       - Z slice selection (via `slices`)
       - XY resampling using skimage.resize with anti-aliasing
     """
     from skimage.transform import resize
+    from skimage.transform import downscale_local_mean
+
+    if channel is None:
+        channel = slice(None)
+    # Normalize indexing to preserve dimensions
+    def normalize_index(idx, name):
+        """Convert various index types to dimension-preserving format"""
+        if idx is None:
+            return slice(None)
+        elif isinstance(idx, (int, np.integer)):
+            return slice(idx, idx + 1)  # Convert int to slice
+        elif isinstance(idx, (list, tuple, np.ndarray)):
+            # For lists, ensure at least 2 elements to preserve dimensions
+            idx_list = list(idx)
+            if len(idx_list) == 1:
+                # Duplicate the single element to preserve dimension
+                return slice(idx_list[0], idx_list[0] + 1)
+            return idx_list
+        elif isinstance(idx, slice):
+            return idx
+        else:
+            raise ValueError(f"Invalid {name} index type: {type(idx)}")
     
+    frames = normalize_index(frames, "frames")
+    slices = normalize_index(slices, "slices") 
+    channel = normalize_index(channel, "channel")
+
 
     with nd2.ND2File(filePath) as f:
         sizes = f.sizes
         dims = list(sizes.keys())
         is_5d = len(dims) == 5
+        metadata = readMeta_new(filePath)
+        nframes = metadata['nframes']
+        nchannels = metadata['nchannels']
+        nzpix = metadata['nzpix']
 
-        # Normalize frame list
-        if isinstance(frame, (int, np.integer)):
-            frames_to_read = [frame]
-            is_single_frame = True
-        else:
-            frames_to_read = list(frame)
-            is_single_frame = False
 
-        frame_data = []
+        # ------------------------------------
+        # Read ND2 data (lazy dask tensor) - ALL FRAMES AT ONCE
+        # ------------------------------------
+        dask_data = f.to_dask()
+        multiframe = True if nframes > 1 else False
+        multiz = True if nzpix > 1 else False
+        multichannel = True if nchannels > 1 else False
 
-        for t in frames_to_read:
-            if t < 0 or t >= sizes["T"]:
-                raise ValueError("Time error")
+        print(f"multiframe is {multiframe}")
+        print(f"multiz is {multiz}")
+        print(f"multichannel is {multichannel}")
+        print(f"nframes is {nframes}")
+        print(f"nzpix is {nzpix}")
+        print(f"nchannels is {nchannels}")
+        
+        # Add dimensions if they don't exist to ensure 5D structure
+        if not multiframe:
+            dask_data = dask_data[None]  # Add T dimension
+        
+        if not multiz:
+            dask_data = dask_data[:, None]  # Add Z dimension
+        
+        if not multichannel:
+            dask_data = dask_data[:, :, None]  # Add C dimension
+        print(f"After adding dimensions: dask_data.shape = {dask_data.shape}, len(data.shape) = {len(dask_data.shape)}")
 
-            # ------------------------------------
-            # Read ND2 data (lazy dask tensor)
-            # ------------------------------------
-            if is_5d:
-                # 5D: T, Z, C, Y, X
-                if slices is None:
-                    dask_data = f.to_dask()[t, :, channel, :, :]
-                else:
-                    dask_data = f.to_dask()[t, slices, channel, :, :]
+        # Apply indexing while preserving dimensions
+        dask_data = dask_data[frames, slices, channel]
 
-                # Transpose Z,Y,X → Y,X,Z
-                dask_data = dask_data.transpose(1, 2, 0)
+        # check if 5D
+        if len(dask_data.shape) != 5:
+            raise ValueError(f"After slicing: dask_data.shape = {dask_data.shape}, len(data.shape) = {len(dask_data.shape)}")
+        
+        
+        print(f"After slicing: dask_data.shape = {dask_data.shape}")
 
-            else:
-                # 4D: T, C, Y, X
-                if slices is not None:
-                    raise ValueError("4D data has no Z, cannot use slices")
-                dask_data = f.to_dask()[t, channel, :, :]
-                dask_data = dask_data[..., None]  # Y,X,1
+        print(f"dask_data.shape is {dask_data.shape}")
+        
 
-            # Convert to numpy
-            data = dask_data.compute() if to_memory else dask_data
+        T, Z, C, Y, X = dask_data.shape
 
-            # ------------------------------------
-            # High-quality XY downsample
-            # ------------------------------------
-            if xy_down > 1:
-                Y, X, Z = data.shape
-                newY = Y // xy_down
-                newX = X // xy_down
+        # ------------------------------------
+        # XY downsample using binning/averaging (dask-native)
+        # ------------------------------------
+        if xy_down > 1:
+            import dask.array as da
+            
+            # Use dask's built-in block reduction for true binning
+            # This reshapes and averages without forcing computation
+            T, Z, C, Y, X = dask_data.shape
+            
+            # Ensure dimensions are divisible by xy_down
+            newY = (Y // xy_down) * xy_down
+            newX = (X // xy_down) * xy_down
+            
+            # Trim to make dimensions divisible
+            if newY != Y or newX != X:
+                dask_data = dask_data[:, :, :, :newY, :newX]
+            
+            # Reshape to create blocks for averaging
+            # (T, Z, C, Y, X) -> (T, Z, C, Y//xy_down, xy_down, X//xy_down, xy_down)
+            reshaped = dask_data.reshape(
+                T, Z, C, 
+                newY // xy_down, xy_down,
+                newX // xy_down, xy_down
+            )
+            
+            # Average over the xy_down dimensions (axes 4 and 6)
+            dask_data = reshaped.mean(axis=(4, 6))
 
-                # skimage resize supports 3D tensors
-                data = resize(
-                    data,
-                    (newY, newX, Z),
-                    order=1,             # 1=bilinear, 3=bicubic
-                    anti_aliasing=True,
-                    preserve_range=True,
-                ).astype(np.float32)
-            else:
-                data = data.astype(np.float32)
+        # Only compute at the very end if requested
+        data = dask_data.compute() if to_memory else dask_data
 
-            frame_data.append(data)
 
-        if is_single_frame:
-            return frame_data[0]
-        else:
-            return np.stack(frame_data, axis=0)    
+        return data   
 
 
 def saveTiff(image_list, config_path, save_path):
@@ -264,7 +327,14 @@ def saveTiff(image_list, config_path, save_path):
         bigtiff=True
     )
 
-def saveTiff_new(image, config_path, metadata, save_path, verbose=True): 
+def saveTiff_new(image, config_path, metadata, save_path, verbose=True):
+    # check dimension of image - should always by TZCYX
+    if image.ndim == 2:
+        image = image[None, None, None, :, :]
+    if image.ndim != 5:
+        raise ValueError("All saved should be 5D (TZCYX)")
+
+    
 
     import json
     config_data = toml.load(config_path)
@@ -272,6 +342,7 @@ def saveTiff_new(image, config_path, metadata, save_path, verbose=True):
 
     spacing_x = metadata['spacing_x']
     spacing_y = metadata['spacing_y']
+    metadata['data_shape'] = image.shape
 
     if verbose:
         print(f"Saving TIFF file to {save_path}")
