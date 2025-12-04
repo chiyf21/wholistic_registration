@@ -239,7 +239,9 @@ def readND2Frame(filePath, frames, slices=None, channel=0, xy_down=1, to_memory=
         print(f"After adding dimensions: dask_data.shape = {dask_data.shape}, len(data.shape) = {len(dask_data.shape)}")
 
         # Apply indexing while preserving dimensions
-        dask_data = dask_data[frames, slices, channel]
+        dask_data = dask_data[frames, ...]
+        dask_data = dask_data[:, slices, ...]
+        dask_data = dask_data[:, :, channel,]
 
         # check if 5D
         if len(dask_data.shape) != 5:
