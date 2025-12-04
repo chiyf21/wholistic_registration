@@ -51,7 +51,7 @@ def wbi_registration_2d(moving_membrane_image,moving_Ca_image,config_file,refere
     #if we pick reference image from moving_image
     refer=config["reference"]
     if refer["pick_reference_auto"]:
-        membrane_ref_1plane,indsort=reference.pick_initial_reference(moving_membrane_image)
+        membrane_ref_1plane,indsort=reference.pick_initial_reference(moving_membrane_image,max_corr_frames=refer['chunk_size'])
     else:
         membrane_ref_1plane=reference_image
 
@@ -74,6 +74,7 @@ def wbi_registration_2d(moving_membrane_image,moving_Ca_image,config_file,refere
     else:
         dat_ref_1plane=membrane_ref_1plane
 
+    # visualization.visualize_2d_image(dat_ref_1plane,title="Reference Image")
     # stack the refence to get a fake 3D image
     dat_ref=np.stack([dat_ref_1plane] * 3, axis=2)
 
@@ -99,7 +100,6 @@ def wbi_registration_2d(moving_membrane_image,moving_Ca_image,config_file,refere
         option['motion']=np.zeros([dat_ref.shape[0],dat_ref.shape[1],2,3])
     else:
         option['motion']=motion_init
-
     #initial the pyramid parameters
     pyramid=config["pyramid"]
     option['r']=pyramid["r"]
@@ -140,7 +140,7 @@ def wbi_registration_2d(moving_membrane_image,moving_Ca_image,config_file,refere
         #get motion
         motion_current, _ , new_coords,error_logs = calFlow3d_Wei_v1.getMotion(dat_mov, dat_ref, smoothPenalty, option)
         if channels["dual_channel"]:
-            corrected_ca = calFlow3d_Wei_v1.correctMotion(dat_ca, motion_current)        
+            corrected_ca = calFlow3d_Wei_v1.correctMotion(dat_ca, motion_current)
         corrected_mem = calFlow3d_Wei_v1.correctMotion(dat_mem, motion_current)
         corrected_mov = calFlow3d_Wei_v1.correctMotion(dat_mov, motion_current)
         initial_error=np.mean((dat_mov-dat_ref)**2)
@@ -158,21 +158,15 @@ def wbi_registration_2d(moving_membrane_image,moving_Ca_image,config_file,refere
         ]
 
         #store the result
-        diff_check = np.abs(corrected_mov[:, :, 0] - dat_ref[:, :, 0])
-        concat = np.concatenate([
-            mem_1plane, 
-            corrected_mov[:, :, 0].astype(np.float32),
-            dat_ref[:, :, 0].astype(np.float32),
-            diff_check.astype(np.float32)
-            ], axis=1)
-        
         errors.append(error)
         mem_channel.append(corrected_mem[:,:,0])
         if channels["dual_channel"]:
             Ca_channel.append(corrected_ca[:,:,0])
         motions.append(motion_current[:,:,0,:])
         
+    
     return cp.asarray(mem_channel).get(),cp.asarray(Ca_channel).get(),dat_ref,errors,cp.asarray(motions).get()
+
 def wbi_registration_3d(moving_membrane_image,moving_Ca_image,config_file,reference_image=None,motion_init=None,verbose=True,frame=None):
     '''Load the config file'''
     config=toml.load(config_file)
@@ -205,10 +199,10 @@ def wbi_registration_3d(moving_membrane_image,moving_Ca_image,config_file,refere
         ref_std=np.std(Ca_ref_transform)
 
         # get the reference data(1 plane)
-        dat_ref=membrane_ref+Ca_ref_transform
+        dat_ref=(membrane_ref+Ca_ref_transform).transpose(2,1,0)
 
     else:
-        dat_ref=membrane_ref
+        dat_ref=membrane_ref.transpose(2,1,0)
 
     # visualization.visualize_2d_image(dat_ref_1plane,title="Reference Image")
     maskConfig=config["mask"]
@@ -255,9 +249,9 @@ def wbi_registration_3d(moving_membrane_image,moving_Ca_image,config_file,refere
             #normalize to the mean and std of the reference
             if refer["pick_reference_auto"]:
                 dat_ca_tran=prep.normalize_std(ref_mean,ref_std,dat_ca_tran)
-            dat_mov=dat_mem+dat_ca_tran
+            dat_mov=(dat_mem+dat_ca_tran).transpose(2,1,0)
         else:
-            dat_mov=dat_mem
+            dat_mov=dat_mem.transpose(2,1,0)
 
         #get mask_mov
         option['mask_mov'] = mask.getMask(dat_mov, thresFactor)
@@ -266,8 +260,8 @@ def wbi_registration_3d(moving_membrane_image,moving_Ca_image,config_file,refere
         #get motion
         motion_current, _ , new_coords,error_logs = calFlow3d_Wei_v1.getMotion(dat_mov, dat_ref, smoothPenalty, option)
         if channels["dual_channel"]:
-            corrected_ca = calFlow3d_Wei_v1.correctMotion(dat_ca, motion_current)
-        corrected_mem = calFlow3d_Wei_v1.correctMotion(dat_mem, motion_current)
+            corrected_ca = calFlow3d_Wei_v1.correctMotion(dat_ca.transpose(2,1,0), motion_current)
+        corrected_mem = calFlow3d_Wei_v1.correctMotion(dat_mem.transpose(2,1,0), motion_current)
         corrected_mov = calFlow3d_Wei_v1.correctMotion(dat_mov, motion_current)
         initial_error=np.mean((dat_mov-dat_ref)**2)
         eventual_error=np.mean((corrected_mov-dat_ref)**2)
@@ -284,19 +278,11 @@ def wbi_registration_3d(moving_membrane_image,moving_Ca_image,config_file,refere
         ]
 
         #store the result
-        diff_check = np.abs(corrected_mov - dat_ref)
-        concat = np.concatenate([
-            dat_mem, 
-            corrected_mov.astype(np.float32),
-            dat_ref.astype(np.float32),
-            diff_check.astype(np.float32)
-            ], axis=1)
-        
         errors.append(error)
-        mem_channel.append(corrected_mem)
+        mem_channel.append(corrected_mem.transpose(2,1,0))
         if channels["dual_channel"]:
-            Ca_channel.append(corrected_ca)
-        motions.append(motion_current)
+            Ca_channel.append(corrected_ca.transpose(2,1,0))
+        motions.append(motion_current.transpose(2,1,0,3))
 
     return cp.asarray(mem_channel).get(),cp.asarray(Ca_channel).get(),dat_ref,errors,cp.asarray(motions).get()
 
