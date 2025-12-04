@@ -464,7 +464,302 @@ def Registration(configPath='./configs/config.toml'):
             if save_ref:
                 ref_z[start_idx:end_idx] = np.repeat(ref_img[None, ...], end_idx - start_idx, axis=0).astype("f4").transpose(base_transpose_axes)
     ##################################################################################################################################
+def Registration_v2(configPath='./configs/config.toml'):
+    """
+    Full registration pipeline that writes outputs as OME-TIFF per-volume per-channel
+    (no zarr). Naming convention: vol_chN_XXXXXX.tif (6-digit frame index).
+    Motion is saved as per-frame HDF5 under 'motion/'.
 
+    Assumptions:
+      - IO.readND2Frame, registration.*, reference.compute_reference_from_block,
+        saveTiff_new are available in the import scope.
+      - saveTiff_new(image, save_path, config_path=None, metadata=None, verbose=True)
+        expects image shape TZCYX (5D).
+    """
+    import os
+    import toml
+    import numpy as np
+    import h5py
+    import math
+    # user-provided save function (assumed imported already)
+    # from your_module import saveTiff_new
+
+    # load config
+    config = toml.load(configPath)
+
+    # basic params
+    output_root = config['file_path']['registrated_path']
+    movingFilePath = config['file_path']['input_path']
+
+    Dim = config['MetaData']['Dim']
+    total_frames = int(config['MetaData']['frames'])
+    SIZE = config['MetaData']['SIZE']
+
+    downsampleXY = config['downsample']['downsampleXY']
+    downsampleZ = config['downsample']['downsampleZ']
+    downsampleT = config['downsample']['downsampleT']
+
+    # compute XY,Z after downsample (X,Y are spatial dims)
+    X = int(SIZE[0] // downsampleXY)
+    Y = int(SIZE[1] // downsampleXY)
+
+    if Dim == 3:
+        if downsampleZ == -1:
+            Z_full = int(SIZE[2])
+            downsampleZ = list(range(Z_full))
+            Z = Z_full
+        else:
+            Z = len(downsampleZ)
+    else:
+        Z = 1  # 2D treated as Z=1 for TIFF saving
+
+    # prepare output directories (one folder per channel)
+    print("Preparing output directories...")
+    out_mem = os.path.join(output_root, "membrane")
+    out_ca  = os.path.join(output_root, "calcium")
+    out_ref = os.path.join(output_root, "reference")
+    out_mot = os.path.join(output_root, "motion")
+
+    os.makedirs(out_mem, exist_ok=True)
+    os.makedirs(out_ca, exist_ok=True)
+
+    save_ref = bool(config['save_config']['save_ref'])
+    save_motion = bool(config['save_config']['save_motion'])
+
+    if save_ref:
+        os.makedirs(out_ref, exist_ok=True)
+    if save_motion:
+        os.makedirs(out_mot, exist_ok=True)
+
+    # mapping for file naming: use the channel indices you read with IO.readND2Frame
+    # In your original code you used channel=1 for membrane and channel=0 for calcium.
+    # We'll use those indices in filenames: membrane -> ch1, calcium -> ch0
+    channel_index_map = {'membrane': 1, 'calcium': 0}
+
+    # helper: write one volume (Z,Y,X) or (Y,X) image to OME-TIFF using saveTiff_new
+
+        # print(f"Saved {fname} (shape {img5d.shape})")
+
+    # ---------------------------
+    # Step A: process the middle chunk (same as your original code)
+    # ---------------------------
+    print("Processing middle chunk to build initial reference...")
+    chunk_size = int(config['reference']['chunk_size'])
+    mid_chunk_size = int(config['reference']['mid_chunk_size'])
+    half_chunk = mid_chunk_size // 2
+    total_mid = total_frames // 2
+    mid_start = total_mid - half_chunk
+    mid_end   = mid_start + mid_chunk_size
+    frames_mid = list(range(mid_start, mid_end))
+
+    # read middle block from nd2
+    mem_mid = IO.readND2Frame(movingFilePath, frames_mid, downsampleZ, channel=1, xy_down=downsampleXY, verbose=False)
+    ca_mid  = IO.readND2Frame(movingFilePath, frames_mid, downsampleZ, channel=0, xy_down=downsampleXY, verbose=False)
+    print(f"Loaded middle block frames {frames_mid[0]} to {frames_mid[-1]}.")
+    mem_mid=np.squeeze(mem_mid)
+    ca_mid =np.squeeze(ca_mid )
+    # compute reference from block
+    ref_img = reference.compute_reference_from_block(mem_mid, ca_mid, config)
+    print("Computed initial reference image.")
+
+    # registration on middle block
+    if Dim == 3:
+        mem_mid_reg, ca_mid_reg, _, _, motion_mid = registration.wbi_registration_3d(
+            mem_mid, ca_mid, configPath, ref_img, frame=mid_start
+        )
+    else:
+        mem_mid_reg, ca_mid_reg, _, _, motion_mid = registration.wbi_registration_2d(
+            mem_mid, ca_mid, configPath, ref_img, frame=mid_start
+        )
+
+    # save middle block results (iterate through frames_mid)
+    print("Saving middle block results to OME-TIFF...")
+    for k, frame_id in enumerate(frames_mid):
+        # membrane
+        mem_frame = mem_mid_reg[k]  # shape (Z,Y,X) or (Y,X)
+        write_volume_as_ome_tiff(mem_frame, out_mem, channel_index_map['membrane'], frame_id,configPath)
+
+        # calcium
+        ca_frame = ca_mid_reg[k]
+        write_volume_as_ome_tiff(ca_frame, out_ca, channel_index_map['calcium'], frame_id,configPath)
+        # reference (optional): ref_img is single 3D or 2D volume; save same ref for each frame in middle block
+        if save_ref:
+            if Dim == 3:
+                ref_frame = ref_img.copy()
+            else:
+                ref_frame = ref_img.copy()
+            write_volume_as_ome_tiff(ref_frame, out_ref, 'ref', frame_id,configPath)  # filename will be vol_chref_xxx
+
+        # motion (optional)
+        if save_motion:
+            mot_frame = motion_mid[k]  # shape (Z,Y,X,3) or (Y,X,3)
+            mot_fname = os.path.join(out_mot, f"motion_{frame_id:06d}.h5")
+            with h5py.File(mot_fname, 'w') as hf:
+                hf.create_dataset('motion', data=mot_frame, compression='gzip')
+            print(f"Saved {mot_fname} (motion field)")
+
+    # ---------------------------
+    # Step B: process backward (from mid_start - 1 down to 0)
+    # ---------------------------
+    print(f"Processing backward: frames {mid_start - downsampleT//2} to 0 step {downsampleT} ...")
+    archors = []
+    # initialize rolling window for reference windows (first chunk_size frames from mem_mid/ca_mid)
+    ref_windows_mem = np.array(mem_mid_reg[0:chunk_size])
+    ref_windows_ca  = np.array(ca_mid_reg[0:chunk_size])
+
+    # iterate backwards in downsampleT steps
+    for idx in range(mid_start - 1, -1, -downsampleT):
+        archors.append(idx)
+
+        mem_img = IO.readND2Frame(movingFilePath, idx, downsampleZ, channel=1, xy_down=downsampleXY, verbose=False)
+        ca_img  = IO.readND2Frame(movingFilePath, idx, downsampleZ, channel=0, xy_down=downsampleXY, verbose=False)
+        mem_img=np.squeeze(mem_img)
+        ca_img =np.squeeze(ca_img )
+
+        # register this frame using register_one_frame
+        mem_reg, ca_reg, ref_img, motion_reg = registration.register_one_frame(
+            configPath, mem_img, ca_img,
+            {"mem": ref_windows_mem, "ca": ref_windows_ca},
+            verbose=True, idx=idx
+        )
+        # save outputs for this single frame
+        write_volume_as_ome_tiff(mem_reg, out_mem, channel_index_map['membrane'], idx,configPath)
+        write_volume_as_ome_tiff(ca_reg, out_ca, channel_index_map['calcium'], idx,configPath)
+
+        if save_ref:
+            write_volume_as_ome_tiff(ref_img, out_ref, 'ref', idx,configPath)
+        if save_motion:
+            mot_fname = os.path.join(out_mot, f"motion_{idx:06d}.h5")
+            with h5py.File(mot_fname, 'w') as hf:
+                hf.create_dataset('motion', data=motion_reg, compression='gzip')
+            print(f"Saved {mot_fname} (motion field)")
+
+        # update rolling window: insert mem_reg / ca_reg at front, drop last
+        if chunk_size > 1:
+            ref_windows_mem[1:chunk_size] = ref_windows_mem[0:chunk_size-1]
+            ref_windows_mem[0] = mem_reg
+            ref_windows_ca[1:chunk_size] = ref_windows_ca[0:chunk_size-1]
+            ref_windows_ca[0] = ca_reg
+        else:
+            ref_windows_mem[0] = mem_reg
+            ref_windows_ca[0] = ca_reg
+
+    # ---------------------------
+    # Step C: process forward (from mid_end to total_frames step downsampleT)
+    # ---------------------------
+    print(f"Processing forward: frames {mid_end+ downsampleT//2} to {total_frames-1} step {downsampleT} ...")
+    # reinitialize rolling window from end of middle block
+    ref_windows_mem = np.array(mem_mid_reg[-chunk_size:])
+    ref_windows_ca  = np.array(ca_mid_reg[-chunk_size:])
+
+    for idx in range(mid_end, total_frames, downsampleT):
+        archors.append(idx)
+
+        mem_img = IO.readND2Frame(movingFilePath, idx, downsampleZ, channel=1, xy_down=downsampleXY, verbose=False)
+        ca_img  = IO.readND2Frame(movingFilePath, idx, downsampleZ, channel=0, xy_down=downsampleXY, verbose=False)
+        mem_img=np.squeeze(mem_img)
+        ca_img =np.squeeze(ca_img )
+
+        mem_reg, ca_reg, ref_img, motion_reg = registration.register_one_frame(
+            configPath, mem_img, ca_img,
+            {"mem": ref_windows_mem, "ca": ref_windows_ca},
+            verbose=True, idx=idx
+        )
+
+        write_volume_as_ome_tiff(mem_reg, out_mem, channel_index_map['membrane'], idx,configPath)
+        write_volume_as_ome_tiff(ca_reg, out_ca, channel_index_map['calcium'], idx,configPath)
+        if save_ref:
+            write_volume_as_ome_tiff(ref_img, out_ref, 'ref', idx,configPath)
+        if save_motion:
+            mot_fname = os.path.join(out_mot, f"motion_{idx:06d}.h5")
+            with h5py.File(mot_fname, 'w') as hf:
+                hf.create_dataset('motion', data=motion_reg, compression='gzip')
+            print(f"Saved {mot_fname} (motion field)")
+
+        # update rolling window: shift left, append new reg at end
+        if chunk_size > 1:
+            ref_windows_mem[0:chunk_size-1] = ref_windows_mem[1:chunk_size]
+            ref_windows_mem[-1] = mem_reg
+            ref_windows_ca[0:chunk_size-1] = ref_windows_ca[1:chunk_size]
+            ref_windows_ca[-1] = ca_reg
+        else:
+            ref_windows_mem[0] = mem_reg
+            ref_windows_ca[0] = ca_reg
+
+    # ---------------------------
+    # Step D: if downsampleT != 1, process full-resolution frames by blocks around anchors
+    # ---------------------------
+    if downsampleT != 1:
+        print("Processing full-resolution frames between anchors (filling downsample gaps)...")
+        # archors is list of frame indices that were processed (downsampled anchor frames)
+        # for each anchor, construct a window around anchor to process intermediate frames
+        for a in archors:
+            # compute start/end indices for this anchor (same logic as original)
+            start_idx = max(0, a - downsampleT // 2 )
+            end_idx = min(total_frames, a + downsampleT // 2)
+            if start_idx<= downsampleT:
+                start_idx=0
+            if  end_idx>= total_frames - downsampleT:
+                end_idx=total_frames
+            print(f"  Processing frames {start_idx}..{end_idx-1} using anchor {a}")
+
+            # build reference images for this anchor from previously saved anchor frames
+            # We need ref_mem/ref_ca as 3D for Dim==3 or 2D for Dim==2.
+            # The original code used mem_z[a].transpose((2,0,1)) because mem_z was T,Z,Y,X
+            # Now, we have stored files on disk; rather than reading them back, we can reconstruct
+            # by reading ND2 frames? But original intent: use the anchor's registered result as ref.
+            # To be consistent and avoid re-reading from disk, we'll re-generate ref_mem/ref_ca by
+            # reading the anchor-registered OME-TIFF we previously saved.
+            # For simplicity, here we read back the saved OME-TIFF for anchor 'a' (membrane and ca).
+            # This keeps logic consistent.
+            anchor_mem_tif = os.path.join(out_mem, f"vol_ch{channel_index_map['membrane']}_{a:06d}.tif")
+            anchor_ca_tif  = os.path.join(out_ca, f"vol_ch{channel_index_map['calcium']}_{a:06d}.tif")
+            try:
+
+                anchor_mem = tifffile.imread(anchor_mem_tif)  # this will return (Z,Y,X) or (Y,X)
+                anchor_ca  = tifffile.imread(anchor_ca_tif)
+            except Exception as e:
+                print(f"  WARNING: failed to read anchor tiff {anchor_mem_tif} or {anchor_ca_tif}: {e}")
+                # fallback: read from ND2 and register a small block centered at anchor
+                anchor_mem = IO.readND2Frame(movingFilePath, [a], downsampleZ, channel=1, xy_down=downsampleXY, verbose=False)[0]
+                anchor_ca  = IO.readND2Frame(movingFilePath, [a], downsampleZ, channel=0, xy_down=downsampleXY, verbose=False)[0]
+
+            # if dual_channel, compose reference image (same as original)
+            if config.get('channels', {}).get('dual_channel', False):
+                # expect registration.transform exists
+                ref_img_anchor = anchor_mem + registration.transform(anchor_ca, config['channels']['k'], config['channels']['function'])
+            else:
+                ref_img_anchor = anchor_mem
+
+            # now read the actual ND2 frames covering [start_idx, end_idx)
+            frames_processing = list(range(start_idx, end_idx))
+            mem_block = IO.readND2Frame(movingFilePath, frames_processing, downsampleZ, channel=1, xy_down=downsampleXY, verbose=False)
+            ca_block  = IO.readND2Frame(movingFilePath, frames_processing, downsampleZ, channel=0, xy_down=downsampleXY, verbose=False)
+            mem_block=np.squeeze(mem_block)
+            ca_block =np.squeeze(ca_block )
+            # run registration on this block (multi-frame)
+            if Dim == 3:
+                mem_reg_block, ca_reg_block, _, _, motion_block = registration.wbi_registration_3d(
+                    mem_block, ca_block, configPath, ref_img_anchor, frame=start_idx
+                )
+            else:
+                mem_reg_block, ca_reg_block, _, _, motion_block = registration.wbi_registration_2d(
+                    mem_block, ca_block, configPath, ref_img_anchor, frame=start_idx
+                )
+
+            # save each frame in this block
+            for k, fi in enumerate(frames_processing):
+                write_volume_as_ome_tiff(mem_reg_block[k], out_mem, channel_index_map['membrane'], fi,configPath)
+                write_volume_as_ome_tiff(ca_reg_block[k], out_ca, channel_index_map['calcium'], fi,configPath)
+                if save_ref:
+                    write_volume_as_ome_tiff(ref_img_anchor, out_ref, 'ref', fi,configPath)
+                if save_motion:
+                    mot_fname = os.path.join(out_mot, f"motion_{fi:06d}.h5")
+                    with h5py.File(mot_fname, 'w') as hf:
+                        hf.create_dataset('motion', data=motion_block[k], compression='gzip')
+                    print(f"Saved {mot_fname} (motion field)")
+
+    print("Registration completed. All outputs saved to:", output_root)
 
 def create_downsample_dataset(
     configPath='./configs/config.toml',
@@ -630,7 +925,165 @@ def create_downsample_dataset(
             motion_out[ti] = np.concatenate([raw_m_ds, reg_m_ds], axis=-2)
 
     print(f"Done. Visualization zarr saved to: {downsampleFilePath}")
+def read_reg_tiff(folder, frame_idx, ch_idx):
+    fname = os.path.join(folder, f"vol_ch{ch_idx}_{frame_idx:06d}.tif")
+    if not os.path.exists(fname):
+        raise FileNotFoundError(f"Cannot find {fname}")
+    vol = tifffile.imread(fname)  # (Z,Y,X)
+    return vol
+def write_volume_as_ome_tiff(volume, out_dir, ch_idx, frame_idx,configPath, spacing_x=1.0, spacing_y=1.0):
+    """
+    volume: np.ndarray, shape (Z,Y,X) for 3D or (Y,X) for 2D
+    out_dir: target directory
+    ch_idx: integer channel id used in filename
+    frame_idx: integer frame index
+    """
+    if volume.ndim == 2:
+        # make (Z=1, Y, X)
+        zvol = volume[np.newaxis, :, :]
+    elif volume.ndim == 3:
+        zvol = volume
+    else:
+        raise ValueError("volume must be 2D or 3D (Z,Y,X)")
 
+    # convert to TZCYX: T=1, Z, C=1, Y, X
+    t = 1
+    Zv, Yv, Xv = zvol.shape
+    img5d = zvol[np.newaxis, :, np.newaxis, :, :]  # shape (1,Z,1,Y,X)
+
+    fname = os.path.join(out_dir, f"vol_ch{ch_idx}_{frame_idx:06d}.tif")
+    # optional metadata: include spacing if available
+    metadata = {'spacing_x': spacing_x, 'spacing_y': spacing_y, 'data_shape': img5d.shape}
+    # call the provided save function
+    IO.saveTiff_new(img5d, fname, config_path=configPath, metadata=metadata, verbose=False)
+def create_downsample_dataset_v2(
+    configPath='./configs/config.toml',
+    downsampleFilePath='./registrated_downsample',
+    ds_XY=4,
+    ds_T=2,
+    block_size=50
+):
+    config = toml.load(configPath)
+
+    raw_path = config['file_path']['input_path']          
+    reg_path = config['file_path']['registrated_path']    
+    Dim = config['MetaData']['Dim']
+    total_frames = config['MetaData']['frames']
+
+    base_dsXY = config['downsample']['downsampleXY']
+    base_dsT  = config['downsample']['downsampleT']
+    base_dsZ  = config['downsample']['downsampleZ']
+
+    if base_dsZ == -1:
+        base_dsZ = list(range(config['MetaData']['SIZE'][2]))
+    else:
+        base_dsZ = base_dsZ
+
+    raw_dsXY = base_dsXY * ds_XY
+    reg_dsXY = ds_XY
+
+
+    if os.path.exists(downsampleFilePath):
+        os.system(f"rm -rf {downsampleFilePath}")
+
+    mem_out_dir = os.path.join(downsampleFilePath, "membrane")
+    cal_out_dir = os.path.join(downsampleFilePath, "calcium")
+    os.makedirs(mem_out_dir)
+    os.makedirs(cal_out_dir)
+
+    # Time point indices
+    raw_index = np.arange(0, total_frames, ds_T)
+    reg_index = np.arange(0, total_frames, ds_T)
+    T_ds = min(len(raw_index), len(reg_index))
+    raw_index = raw_index[:T_ds]
+    reg_index = reg_index[:T_ds]
+
+    # ------------ Get reg dimensions ------------
+    reg_mem_path = os.path.join(reg_path, "membrane")
+    reg_cal_path = os.path.join(reg_path, "calcium")
+
+    first_reg = read_reg_tiff(reg_mem_path, reg_index[0], ch_idx=1)  # (Z,Y,X)
+    Z_raw, Y_raw, X_raw = first_reg.shape
+    Y_ds = Y_raw // ds_XY
+    X_ds = X_raw // ds_XY
+
+    print(f"[INFO] Downsampled shape: Z={Z_raw}, Y={Y_ds}, X={X_ds}")
+
+    #
+    num_blocks = (T_ds + block_size - 1) // block_size
+    print(f"[INFO] Total frames after T-downsample: {T_ds}")
+    print(f"[INFO] Block count: {num_blocks}")
+
+    for b in range(num_blocks):
+        print(f"Processing block {b+1}/{num_blocks}...")
+        start = b * block_size
+        end   = min((b+1)*block_size, T_ds)
+        size  = end - start
+
+        raw_frames = raw_index[start:end]
+
+        # raw_block_mem shape (T, Yd, Xd, Z) after transpose
+        raw_block_mem = IO.readND2Frame(
+            raw_path, frames=raw_frames, slices=base_dsZ,
+            channel=1, xy_down=raw_dsXY, verbose=False
+        )
+
+        raw_block_cal = IO.readND2Frame(
+            raw_path, frames=raw_frames, slices=base_dsZ,
+            channel=0, xy_down=raw_dsXY, verbose=False
+        )
+        raw_block_mem = np.squeeze(raw_block_mem)
+        raw_block_cal = np.squeeze(raw_block_cal)
+        ti_reg_list = reg_index[start:end]
+        Gm_block_list, Gc_block_list = [], []
+
+        for idx in ti_reg_list:
+            gm = read_reg_tiff(reg_mem_path, idx, ch_idx=1)  # (Z,Y,X)
+            gc = read_reg_tiff(reg_cal_path, idx, ch_idx=0)
+            Gm_block_list.append(gm)
+            Gc_block_list.append(gc)
+
+        Gm_block = np.array(Gm_block_list)  # (T,Z,Y,X)
+        Gc_block = np.array(Gc_block_list)
+
+
+        # Convert to (T,Z,C,Y,X) for mean pooling downsample
+
+
+        # raw_block_mem = raw_block_mem[:, :, np.newaxis, :, :]
+        # raw_block_cal = raw_block_cal[:, :, np.newaxis, :, :]
+
+        # Gm_block = Gm_block[:, :, np.newaxis, :, :]
+        # Gc_block = Gc_block[:, :, np.newaxis, :, :]
+
+        # XY downsampling
+
+
+        Gm_block_ds = IO.downsample(np.expand_dims(Gm_block, axis=2), xy_down=ds_XY)[:, :, 0]
+        Gc_block_ds = IO.downsample(np.expand_dims(Gc_block, axis=2), xy_down=ds_XY)[:, :, 0]
+
+        # -------- concatenate raw + reg (Z,Y,X_raw + X_reg) --------
+        mem_block = np.concatenate([raw_block_mem, Gm_block_ds], axis=-1)
+        cal_block = np.concatenate([raw_block_cal, Gc_block_ds], axis=-1)
+
+        for i in range(size):
+            frame_id = reg_index[start + i]  # 用 reg 的 frame index 作为输出编号
+
+            write_volume_as_ome_tiff(
+                volume=mem_block[i], out_dir=mem_out_dir,
+                ch_idx=1, frame_idx=frame_id,
+                configPath=configPath
+            )
+
+            write_volume_as_ome_tiff(
+                volume=cal_block[i], out_dir=cal_out_dir,
+                ch_idx=0, frame_idx=frame_id,
+                configPath=configPath
+            )
+
+        print(f"Block {b+1}/{num_blocks} finished.")
+
+    print("[ALL DONE] Downsampled dataset created successfully.")
 # def getMask(config,
 #             maskPath,
 #             n=20,
