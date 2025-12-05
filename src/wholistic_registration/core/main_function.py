@@ -1,16 +1,19 @@
-from ..utils import IO, reference, registration
+from utils import IO,reference,registration
 import zarr
 import toml
 import numpy as np
 from skimage.transform import resize
 from numcodecs import Blosc
-from ..utils.reliableAnalysis import get_reliable_mask, get_spatial_mask, get_temporal_and_accumula_mask
+from utils.reliableAnalysis import gradient_amplitude,compute_spatial_mask,compute_temporal_and_accumula_masks
 import  os
+from utils import imresize
+import tifffile
 
 def DefineParams(
                 configFile='./configs/config.toml',
                 inputFile=None,
                 outputFile=None,
+                maskFile=None,
                 downsampleXY=1,
                 downsampleT=1,
                 downsampleZ=1,
@@ -28,6 +31,14 @@ def DefineParams(
                 smoothPenalty=0.08,
                 save_ref=True,
                 save_motion=False,
+                n=20,
+                n2=20,
+                n3=40,
+                sigma=3,
+                sigma2=10.0,
+                decay=0.99,
+                temporalMaskThres=3,
+                spatialMaskThres=-1,
                 verbose=True
 ):
     '''
@@ -108,10 +119,40 @@ def DefineParams(
     -smoothPenalty
         The coefficient of the smoothness penalty term
         A larger smoothPenalty means more smooth motion we will get and correspondingly the error of intensity will increase
+
+    [Reliable Analysis]
+    Params:
+    - n
+        The number of temporal samples used in the first-stage temporal smoothing.
+        A larger value offers more robust estimation but may oversmooth fast-changing signals.
+    - n2
+        The number of temporal samples used in the second, stronger temporal aggregation.
+        Typically greater than n, producing a more stable reference for cumulative mask generation.
+    - n3
+        The number of samples or the effective range for spatial neighborhood evaluation.
+        Controls the spatial robustness of the spatial mask by aggregating statistics over a wider window.
+    - sigma
+        Standard deviation of the Gaussian kernel for the first-pass spatial smoothing.
+        Determines the strength of spatial denoising during spatial mask template creation.
+    - sigma2
+        Standard deviation of the second, stronger Gaussian smoothing operation.
+        Used for temporal and accumulative mask estimation to enhance long-term structural stability.
+    - decay
+        Exponential decay factor governing how historical temporal evidence influences the cumulative mask.
+        Values close to 1 emphasize long-term statistics; smaller values focus on recent frames.
+    - temporalMaskThres
+        Threshold for generating the temporal mask.
+        Voxels with temporal stability metrics below this value are marked as unreliable.
+    - spatialMaskThres
+        Threshold for generating the spatial mask.
+        A higher threshold produces a more conservative spatial mask; a lower threshold retains more voxels.
     '''
     ## read the metadata
     print("Reading meta data")
-    if inputFile is not None:
+    if inputFile is None:
+        raise ValueError("inputFile must not be None. A valid file path is required.")
+    
+    elif inputFile is not None:
         meta=IO.readMeta_new(inputFile,Ifprint=verbose)
         nchannels=meta['nchannels']
         nframes=meta['nframes']
@@ -131,12 +172,16 @@ def DefineParams(
     config=toml.load(config_path)
 
     #change the meta data 
+    config['MetaData']['nchannels']=nchannels
     config['MetaData']['zRatio']=zRatio
     config['MetaData']['SIZE']=data_shape
     config['MetaData']['frames']=nframes
     config['MetaData']['Dim']=len(data_shape)
     config['MetaData']['voxelsize']=resolutionxyz
-    config['MetaData']['frame_rate']=framerate
+    config['MetaData']['fps']=framerate
+    config['MetaData']['spacing_x']=spacing_x
+    config['MetaData']['spacing_y']=spacing_y
+    config['MetaData']['spacing_z']=spacing_z
 
     #change the downsample config
     config['downsample']['downsampleXY']=downsampleXY
@@ -146,7 +191,7 @@ def DefineParams(
     #change the filepath
     config['file_path']['input_path']=inputFile
     config['file_path']['registrated_path']=outputFile
-
+    config['file_path']['mask_path']=maskFile
     #change the dual_channels config
     config['channels']['dual_channel']=dual_channel
     config['channels']['function']=function
@@ -156,6 +201,7 @@ def DefineParams(
     config['reference']['chunk_size']=chunk_size
     config['reference']['mid_chunk_size']=mid_chunk_size
     config['reference']['pick_reference_auto']=False
+
     #change the preprocess config
     config['preprocess']['normailize_to_0_255']=preprocess
 
@@ -169,8 +215,17 @@ def DefineParams(
     config['pyramid']['iter']=iter
     config['pyramid']['smoothPenalty']=smoothPenalty
 
-    #change the pyramid config
+    #change the Reliable analysis config
+    config['Reliable_Analysis']['n']=n
+    config['Reliable_Analysis']['n2']=n2
+    config['Reliable_Analysis']['n3']=n3
+    config['Reliable_Analysis']['sigma']=sigma
+    config['Reliable_Analysis']['sigma2']=sigma2
+    config['Reliable_Analysis']['decay']=decay
+    config['Reliable_Analysis']['temporalMaskThres']=temporalMaskThres
+    config['Reliable_Analysis']['spatialMaskThres']=-spatialMaskThres
 
+    #change the pyramid config
     config['save_config']['save_ref']=save_ref
     config['save_config']['save_motion']=save_motion
     with open(configFile,'w') as f:
@@ -221,8 +276,19 @@ def DefineParams(
         print(f"  iter          : {config['pyramid']['iter']}")
         print(f"  smoothPenalty : {config['pyramid']['smoothPenalty']}")
 
+        print("\n[Reliable Analysis]")
+        print(f"  n            : {config['Reliable Analysis']['n']}")
+        print(f"  n2           : {config['Reliable Analysis']['n2']}")
+        print(f"  n3           : {config['Reliable Analysis']['n3']}")
+        print(f"  sigma        : {config['Reliable Analysis']['sigma']}")
+        print(f"  sigma2       : {config['Reliable Analysis']['sigma2']}")
+        print(f"  decay        : {config['Reliable Analysis']['decay']}")
+        print(f"  temporalMaskThres : {config['Reliable Analysis']['temporalMaskThres']}")
+        print(f"  spatialMaskThres : {config['Reliable Analysis']['spatialMaskThres']}")
+
         print("--------------------------------------------------")
         print("Configuration loaded successfully.\n")
+
 
 def Registration(configPath='./configs/config.toml'):
     config=toml.load(configPath)
@@ -1084,61 +1150,87 @@ def create_downsample_dataset_v2(
         print(f"Block {b+1}/{num_blocks} finished.")
 
     print("[ALL DONE] Downsampled dataset created successfully.")
-# def getMask(config,
-#             maskPath,
-#             n=20,
-#             n2=20,
-#             n3=40,
-#             sigma=3,
-#             sigma2=10.0,
-#             decay=0.99,
-#             temporalMaskThres=3,
-#             spatialMaskThres=-1
-#             ):
-#     option={
-#         'n':n,
-#         'n2':n2,
-#         'n3':n3,
-#         'sigma':sigma,
-#         'sigma2':sigma2,
-#         'decay':decay,
-#         'temporalMaskThres':temporalMaskThres,
-#         'spatialMaskThres':spatialMaskThres
-#     }
-#     config=toml.load(config)
-#     Dim=config['MetaData']['Dim']
-#     root=zarr.open(config['file_path']['registrated_path'],mode='r')
-#     mem = root["membrane"]
-#     ca = root["calcium"]
-#     if "reference" not in root:
-#         raise ValueError("Input zarr must contain 'reference' dataset.")
-#     ref = root["reference"]
+def ReliableAnalysis(
+    configPath: str = None
+):
+    """
+    Main entry function for computing spatial, temporal, and accumulative
+    reliability masks.
 
-#       # 假设 3D 情况 (T,X,Y)；如果是 Z 维可自行扩展
+    Directory structure under `registrated_path` must be:
+        root_dir/
+            ├── membrane/
+            ├── calcium/
+            └── reference/
 
-#     # 创建输出 zarr
-#     out = zarr.open(maskPath, mode='a')
-#     if Dim==3:
-#         T, Z, X, Y = mem.shape
-#         mask_temporal = out.require_dataset(
-#             "mask_temporal", shape=(T, Z, X, Y), dtype=float, overwrite=True
-#         )
-#         mask_accumula = out.require_dataset(
-#             "mask_accumula", shape=(T, Z, X, Y), dtype=float, overwrite=True
-#         )
-#         mask_spatial = out.require_dataset(
-#             "mask_spatial", shape=(Z, X, Y), dtype=bool, overwrite=True
-#         )
+    The user must provide a correlation function:
 
-#     if Dim==2:
-#         T, X, Y = mem.shape
-#         mask_temporal = out.require_dataset(
-#             "mask_temporal", shape=(T, X, Y), dtype=float, overwrite=True
-#         )
-#         mask_accumula = out.require_dataset(
-#             "mask_accumula", shape=(T, X, Y), dtype=float, overwrite=True
-#         )
-#         mask_spatial = out.require_dataset(
-#             "mask_spatial", shape=(X, Y), dtype=bool, overwrite=True
-#         )
+        def compute_cor_fn(membrane_frame, calcium_frame):
+            return dat_cor   # shape (Z, Y, X)
+
+    All output masks will be stored under the directory specified by
+    `mask_path` in the config file.
+    """
+    config= toml.load(configPath)
+    root_dir = config['file_path']['registrated_path']
+    out_dir  = config['file_path']['mask_path']
+
+    mem_dir = os.path.join(root_dir, "membrane")
+    ca_dir  = os.path.join(root_dir, "calcium")
+    ref_dir = os.path.join(root_dir, "reference")
+
+
+    temporal_dir = os.path.join(out_dir, "temporal_Mask")
+    accumula_dir = os.path.join(out_dir, "accumula_Mask")
+    spatial_dir  = os.path.join(out_dir, "spatial_Mask")
+    os.makedirs(spatial_dir, exist_ok=True)
+    os.makedirs(accumula_dir, exist_ok=True)
+    os.makedirs(temporal_dir, exist_ok=True)
+    frames = sorted(os.listdir(ref_dir))
+    T = len(frames)
+
+    def compute_cor_fn(mem,ca):
+        if config['channels']['dual_channel']:
+            k = config['channels']['k']
+            function = config['channels']['function']
+            ca_transformed = registration.transform(ca, k, function)
+            cor = mem + ca_transformed
+        else:
+            cor = mem
+        return cor
+    # ------------------------------------------------------------------
+    # Pass 1: Construct spatial mask template from the first n_template frames
+    # ------------------------------------------------------------------
+
+    spatial_mask = compute_spatial_mask(
+        mem_dir,
+        ca_dir,
+        ref_dir,
+        config['Reliable_Analysis'],
+        compute_cor_fn,
+        read_reg_tiff,
+        write_volume_as_ome_tiff,
+        configPath,
+        spatial_dir,
+        T
+    )
+
+    # ------------------------------------------------------------------
+    # Pass 2: Compute temporal and accumulative masks frame-by-frame
+    # ------------------------------------------------------------------
+    print("Pass 2: processing temporal/accumula frame-by-frame")
+    compute_temporal_and_accumula_masks(
+        mem_dir,
+        ca_dir,
+        ref_dir,
+        temporal_dir,
+        accumula_dir,
+        T,
+        compute_cor_fn,
+        config['Reliable_Analysis'],
+        configPath,
+        read_reg_tiff,
+        write_volume_as_ome_tiff
+    )
+
 
