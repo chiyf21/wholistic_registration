@@ -2,7 +2,47 @@
 from . import cp
 from . import cupy_ndimage
 
+def write_multichannel_volume_as_ome_tiff(vol3d_list, out_dir, frame_idx, configPath,
+                                          spacing_x=1.0, spacing_y=1.0):
+    """
+    vol3d_list: list of 3 arrays, each (Z,Y,X)
+        ch0, ch1, ch2
 
+    output OME TIFF shape: (1, Z, 3, Y, X)
+    """
+
+    assert len(vol3d_list) == 3, "vol3d_list must contain exactly 3 volumes."
+
+    processed = []
+    for v in vol3d_list:
+        if v.ndim == 2:
+            v = v[np.newaxis, :, :]
+        if v.dtype == bool:
+            v = v.astype(np.uint8)
+        elif v.dtype not in [np.uint8, np.float32]:
+            v = v.astype(np.float32)
+        processed.append(v)
+
+    Z, Y, X = processed[0].shape
+    img5d = np.stack(processed, axis=0)     # (3, Z, Y, X)
+    img5d = img5d[np.newaxis, :, :, :, :]   # (1,3,Z,Y,X)
+    img5d = np.transpose(img5d, (0, 2, 1, 3, 4))  # → (1,Z,3,Y,X)
+
+    fname = os.path.join(out_dir, f"vol_{frame_idx:06d}_masked.tif")
+
+    metadata = {
+        'spacing_x': spacing_x,
+        'spacing_y': spacing_y,
+        'data_shape': img5d.shape
+    }
+
+    IO.saveTiff_new(
+        img5d,
+        fname,
+        config_path=configPath,
+        metadata=metadata,
+        verbose=False
+    )
 def gradient_amplitude(volume: cp.ndarray) -> cp.ndarray:
     """
     Compute gradient amplitude of a 2D/3D image.
@@ -285,3 +325,155 @@ def compute_temporal_and_accumula_masks(
 
     print("Finished computing temporal & accumulative masks.")
 
+def compute_temporal_and_accumula_masks_v2(
+    mem_dir,
+    ca_dir,
+    ref_dir,
+    out_temporal_dir,
+    out_accumula_dir,
+    T,
+    compute_cor_fn,
+    option,
+    configPath,
+    read_reg_tiff,
+    write_volume_as_ome_tiff
+):
+    """
+    Compute temporal masks and accumulative masks in a fully streaming manner.
+
+    This function processes the dataset frame-by-frame and generates two types
+    of masks:
+        1. Temporal mask:
+            Identifies short-term transient changes by computing a z-score
+            over a sliding window of the most recent `n` frames.
+        2. Accumulative mask:
+            Tracks persistent or long-term signal changes using a separate
+            window of size `n3`, combined with an accumulation threshold `n2`.
+
+    The entire workflow is streaming-based:
+        - All temporal statistics (mean, std, past masks) are maintained in
+          memory using ring buffers.
+        - No past masks are reloaded from disk.
+        - Each newly generated mask is saved as a single-frame OME-TIFF.
+
+    Parameters
+    ----------
+    mem_dir : str
+        Directory containing the registered membrane channel.
+    ca_dir : str
+        Directory containing the registered calcium channel.
+    ref_dir : str
+        Directory containing the registered reference channel.
+    out_temporal_dir : str
+        Output directory for temporal masks.
+    out_accumula_dir : str
+        Output directory for accumulative masks.
+    T : int
+        Total number of frames to process.
+    compute_cor_fn : callable
+        User-supplied function computing correlation volume:
+            cor = compute_cor_fn(mem, ca)
+        Must return a CuPy array of shape (Z, Y, X).
+    option : dict
+        Parameter dictionary containing:
+            'sigma2' : float
+                Gaussian smoothing standard deviation for difference volume.
+            'temporalMaskThres' : float
+                Z-score threshold for temporal mask.
+            'n' : int
+                Size of ring buffer for temporal z-score statistics.
+            'n2' : int
+                Threshold for accumulative mask activation.
+            'n3' : int
+                Size of buffer for long-term accumulation.
+    configPath : str
+        Path to the pipeline configuration file.
+    read_reg_tiff : callable
+        Function to read a single registered frame:
+            vol = read_reg_tiff(path, frame_index, channel)
+        Returns a CuPy or NumPy array of shape (Z, Y, X).
+    write_volume_as_ome_tiff : callable
+        Function to save a 3D volume as an OME-TIFF file.
+
+    Notes
+    -----
+    - `diff_buffer` tracks the last `n` smoothed difference volumes for
+      computing temporal z-scores.
+    - `temporal_buffer` tracks the last `n3` binary temporal masks for
+      long-term accumulation.
+    - `distCnt` maintains cumulative temporal activity counts.
+    - `accum_prev` keeps previously computed accumulative mask to ensure
+      monotonic growth.
+
+    Returns
+    -------
+    None
+        All outputs are written directly to disk during processing.
+    """
+
+    sigma2 = option["sigma2"]
+    temporalTh = option["temporalMaskThres"]
+
+    n  = option["n"]
+    n2 = option["n2"]
+    n3 = option["n3"]
+
+    diff_buffer = None  #  (n, Z, Y, X)
+    temporal_buffer = None  #(n3, Z, Y, X)
+    distCnt = None
+    accum_prev = None
+    import toml
+    config=toml.load(configPath)
+    for t in range(T):
+        if t % 100 == 0:
+            print("Processed", t)
+        mem = read_reg_tiff(mem_dir, t, 1)       
+        ca  = read_reg_tiff(ca_dir,  t, 0)
+        ref = cp.asarray(read_reg_tiff(ref_dir, t, 'ref'))
+        cor = cp.asarray(compute_cor_fn(mem, ca))
+        dif = cp.abs(cor - ref)
+        dif = cupy_ndimage.gaussian_filter(dif, sigma=sigma2)
+        if diff_buffer is None:
+            diff_buffer = cp.zeros((n,)  + dif.shape, dtype=cp.float32)
+            temporal_buffer = cp.zeros((n3,) + dif.shape, dtype=cp.bool_)
+            distCnt = cp.zeros(dif.shape, dtype=cp.int32)
+            accum_prev = cp.zeros(dif.shape, dtype=cp.bool_)
+
+        if t < n:
+            diff_buffer[t % n] = dif
+            mask_final = spatial_mask 
+        else:
+            diff_mu = cp.mean(diff_buffer, axis=0)
+            diff_sigma = cp.std(diff_buffer, axis=0) + 1e-6
+            dat_z = (dif - diff_mu) / diff_sigma
+
+            temporalMask = (dat_z > temporalTh)
+
+            distCnt += temporalMask
+            if t >= n3:
+                old_idx = t % n3
+                distCnt -= temporal_buffer[old_idx]
+
+            temporal_buffer[t % n3] = temporalMask
+
+            accumulaMask = (accum_prev | (distCnt > n2))
+            accum_prev = accumulaMask
+
+            mask_final = (spatial_mask | temporalMask | accumulaMask)
+
+            diff_buffer[t % n] = dif
+
+        mask_final_cpu = cp.asnumpy(mask_final)
+        mem_cpu = cp.asnumpy(mem)
+        masked_cpu = mem_cpu * (1-mask_final_cpu)
+        
+
+        write_multichannel_volume_as_ome_tiff(
+            [mem_cpu, masked_cpu, mask_final_cpu.astype(np.uint8)],
+            out_dir=config['file_path']['mask_path'],
+            frame_idx=t,
+            configPath=configPath
+        )
+
+
+    print("Finished computing temporal & accumulative masks.")
