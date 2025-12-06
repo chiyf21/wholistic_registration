@@ -329,14 +329,12 @@ def compute_temporal_and_accumula_masks_v2(
     mem_dir,
     ca_dir,
     ref_dir,
-    out_temporal_dir,
-    out_accumula_dir,
+    spatial_mask,
     T,
     compute_cor_fn,
     option,
     configPath,
-    read_reg_tiff,
-    write_volume_as_ome_tiff
+    read_reg_tiff
 ):
     """
     Compute temporal masks and accumulative masks in a fully streaming manner.
