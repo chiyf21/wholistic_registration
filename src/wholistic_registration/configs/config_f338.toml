@@ -1,0 +1,45 @@
+[MetaData]
+zRatio = 27.69230769230769
+SIZE = [ 2304, 1708, 13,]
+frames = 1598
+Dim = 3
+voxelsize = [ 0.325, 0.325, 9.0,]
+frame_rate = 3.7138284802408186
+
+[downsample]
+downsampleXY = 1
+downsampleT = 1
+downsampleZ = -1
+
+[file_path]
+input_path = "/home/cyf/wbi/Virginia/f338/221124_f338_ubi_gCaMP7f_bactin_mCherry_CAAX_7dpf002.nd2"
+output_path = ""
+registrated_path = "/home/cyf/wbi/Virginia/f338_1023registrated.zarr"
+
+[channels]
+dual_channel = true
+function = "log10"
+k = 50
+
+[reference]
+pick_reference_auto = false
+chunk_size = 50
+mid_chunk_size = 200
+
+[preprocess]
+normalize_to_0_255 = false
+normailize_to_0_255 = false
+
+[mask]
+thresFactor = 5
+maskRange = [ 5, 4000,]
+
+[pyramid]
+layer = 3
+r = 5
+iter = 10
+smoothPenalty = 0.05
+
+[save_config]
+save_ref = true
+save_motion = false
