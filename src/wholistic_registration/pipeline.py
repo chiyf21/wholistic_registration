@@ -31,6 +31,10 @@ main_function.create_downsample_dataset(
 )
 
 ## reliable analysis
-# main_function.ReliableAnalysis(
-#     './configs/config.toml'
-# )
+main_function.ReliableAnalysis(
+    './wbi_1201/configs/config.toml'
+)
+
+##reference comparation
+main_function.ReferenceComparation( './wbi_1201/configs/config.toml')
+
