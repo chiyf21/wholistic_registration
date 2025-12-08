@@ -462,3 +462,108 @@ def readTifff(tiff_path):
         config = json.loads(desc)
 
     return images, config
+def write_volume_as_ome_tiff(volume, out_dir, ch_idx, frame_idx, configPath,
+                             spacing_x=1.0, spacing_y=1.0):
+    """
+    volume: np.ndarray, shape (Z,Y,X) or (Y,X)
+    out_dir: target directory
+    ch_idx: integer channel id used in filename
+    frame_idx: integer or string like '100~200'
+    """
+    if isinstance(frame_idx, int):
+        frame_tag = f"{frame_idx:06d}"
+    elif isinstance(frame_idx, str):
+        cleaned = frame_idx.replace('-', '~').replace('_', '~')
+        parts = cleaned.split("~")
+        if len(parts) == 1:
+            try:
+                frame_tag = f"{int(parts[0]):06d}"
+            except:
+                raise ValueError(f"Invalid frame_idx string: {frame_idx}")
+
+        elif len(parts) == 2:
+            try:
+                a, b = int(parts[0]), int(parts[1])
+                frame_tag = f"{a:06d}_{b:06d}"
+            except:
+                raise ValueError(f"Invalid frame_idx string: {frame_idx}")
+        elif len(parts)==5:
+            try:
+                a, b ,c,d= int(parts[0]), int(parts[1]),int(parts[3]),int(parts[4])
+                frame_tag = f"{a:04d}~{b:04d}_vs_{c:04d}~{d:04d}"
+            except:
+                raise ValueError(f"Invalid frame_idx string: {frame_idx}")
+        else:
+            raise ValueError(f"Invalid frame_idx format: {frame_idx}")
+
+    else:
+        raise TypeError("frame_idx must be int or string")
+
+    if volume.ndim == 2:
+        zvol = volume[np.newaxis, :, :]
+    elif volume.ndim == 3:
+        zvol = volume
+    else:
+        raise ValueError("volume must be 2D or 3D (Z,Y,X)")
+    img5d = zvol[np.newaxis, :, np.newaxis, :, :]  # (1,Z,1,Y,X)
+    os.makedirs(out_dir, exist_ok=True)
+    fname = os.path.join(out_dir, f"vol_ch{ch_idx}_{frame_tag}.tif")
+    metadata = {
+        'spacing_x': spacing_x,
+        'spacing_y': spacing_y,
+        'data_shape': img5d.shape
+    }
+
+    saveTiff_new(img5d, fname, config_path=configPath,
+                    metadata=metadata, verbose=False)
+
+    return fname
+def write_multichannel_volume_as_ome_tiff(volume, out_dir, frame_idx, configPath,label=None,
+                                          spacing_x=1.0, spacing_y=1.0):
+    """
+    vol3d_list: list of 3 arrays, each (Z,Y,X)
+        ch0, ch1, ch2
+
+    输出 OME TIFF shape: (1, Z, 3, Y, X)
+    """
+
+
+    processed = []
+    for v in volume:
+        if v.ndim == 2:
+            v = v[np.newaxis, :, :]
+        if v.dtype == bool:
+            v = v.astype(np.uint8)
+        elif v.dtype not in [np.uint8, np.float32]:
+            v = v.astype(np.float32)
+        processed.append(v)
+
+    Z, Y, X = processed[0].shape
+    img5d = np.stack(processed, axis=0)     # (3, Z, Y, X)
+    img5d = img5d[np.newaxis, :, :, :, :]   # (1,3,Z,Y,X)
+    img5d = np.transpose(img5d, (0, 2, 1, 3, 4))  # → (1,Z,3,Y,X)
+
+    fname = os.path.join(out_dir, f"vol_{frame_idx:06d}_{label}.tif")
+
+    metadata = {
+        'spacing_x': spacing_x,
+        'spacing_y': spacing_y,
+        'data_shape': img5d.shape
+    }
+
+    saveTiff_new(
+        img5d,
+        fname,
+        config_path=configPath,
+        metadata=metadata,
+        verbose=False
+    )                
+
+
+def read_reg_tiff(folder, frame_idx, ch_idx):
+    fname = os.path.join(folder, f"vol_ch{ch_idx}_{frame_idx:06d}.tif")
+    if not os.path.exists(fname):
+        raise FileNotFoundError(f"Cannot find {fname}")
+    vol = tifffile.imread(fname)  # (Z,Y,X)
+    return vol
+
