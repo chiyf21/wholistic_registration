@@ -475,3 +475,191 @@ def compute_temporal_and_accumula_masks_v2(
 
 
     print("Finished computing temporal & accumulative masks.")
+
+####################################################################################################################
+
+## 2024/12/8 update
+## change the mask to a float format
+##
+
+from skimage.metrics import structural_similarity  as ssim
+from scipy.ndimage import gaussian_filter
+
+def local_ssim_difference(I_ref,I_mov,win_size=11,use_3d=False,sigma_3d=1.5):
+    """
+    Compute local SSIM difference map (0~1) between two images.
+    Supports 2D and 3D images. 
+    
+    Parameters
+    ----------
+    I_ref : np.ndarray
+        Reference image (2D or 3D).
+    I_mov : np.ndarray
+        Registered/moving image (must match shape of I_ref).
+    win_size : int
+        SSIM window size for 2D (odd number like 11, 21).
+    use_3d : bool
+        If True, compute a true 3D SSIM approximation using Gaussian smoothing.
+        If False, compute 2D SSIM slice-by-slice for 3D volumes (recommended for microscopy).
+    sigma_3d : float or tuple
+        Gaussian sigma used in 3D SSIM approximation mode.
+
+    Returns
+    -------
+    D : np.ndarray, float32
+        Difference map in [0,1], same shape as input.
+    """
+    I_ref=I_ref.astype(np.float32)
+    I_mov=I_mov.astype(np.float32)
+    
+    if I_ref.ndim not in [2, 3]:
+        raise ValueError("Input images must be 2D or 3D numpy arrays.")
+    
+    if I_ref.shape != I_mov.shape:
+        raise ValueError("Input images must have the same shape.")
+    # -----------------------
+    # Case 1: 2D Image
+    # -----------------------
+    if I_ref.ndim == 2:
+        _, ssim_map = ssim(
+            I_ref, I_mov,
+            win_size=win_size,
+            gaussian_weights=True,
+            data_range=I_ref.max() - I_ref.min(),
+            full=True
+        )
+        D = (1 - ssim_map) / 2.0
+        return np.clip(D.astype(np.float32), 0, 1)
+
+    # -----------------------
+    # Case 2: 3D Image
+    # -----------------------
+    if not use_3d:
+        # --- Slice-wise 2D SSIM (recommended for microscopy with low Z-resolution)
+        Z = I_ref.shape[0]
+        D = np.zeros_like(I_ref, dtype=np.float32)
+
+        for z in range(Z):
+            _, ssim_map = ssim(
+                I_ref[z], I_mov[z],
+                win_size=win_size,
+                gaussian_weights=True,
+                data_range=I_ref[z].max() - I_ref[z].min(),
+                full=True
+            )
+            D[z] = (1 - ssim_map) / 2.0
+        
+        return np.clip(D, 0, 1)
+
+    else:
+        # --- True 3D SSIM approximation using Gaussian filters
+        #     (Useful only if Z-resolution is comparable to XY)
+        
+        C1 = (0.01 * (I_ref.max() - I_ref.min())) ** 2
+        C2 = (0.03 * (I_ref.max() - I_ref.min())) ** 2
+
+        mu_x = gaussian_filter(I_ref, sigma=sigma_3d)
+        mu_y = gaussian_filter(I_mov, sigma=sigma_3d)
+
+        mu_x2 = mu_x * mu_x
+        mu_y2 = mu_y * mu_y
+        mu_xy = mu_x * mu_y
+
+        sigma_x2 = gaussian_filter(I_ref * I_ref, sigma=sigma_3d) - mu_x2
+        sigma_y2 = gaussian_filter(I_mov * I_mov, sigma=sigma_3d) - mu_y2
+        sigma_xy = gaussian_filter(I_ref * I_mov, sigma=sigma_3d) - mu_xy
+
+        numerator = (2 * mu_xy + C1) * (2 * sigma_xy + C2)
+        denominator = (mu_x2 + mu_y2 + C1) * (sigma_x2 + sigma_y2 + C2)
+
+        ssim_map = numerator / (denominator + 1e-12)
+        D = (1 - ssim_map) / 2
+
+        return np.clip(D.astype(np.float32), 0, 1)
+    
+def build_reference_index(ref_dir):
+    """
+    scan reference folder, construct frame -> filepath
+    return:
+        ref_map: dict(frame -> filepath)
+        ref_files: list of all files
+    """
+    ref_files = [f for f in os.listdir(ref_dir) if f.endswith(".tif")]
+    ref_map = {}
+
+    for f in ref_files:
+        m_multi = re.match(r"vol_chref_(\d{6})_(\d{6})\.tif", f)
+        m_single = re.match(r"vol_chref_(\d{6})\.tif", f)
+
+        if m_multi:
+            a = int(m_multi.group(1))
+            b = int(m_multi.group(2))
+            for t in range(a, b + 1):
+                ref_map[t] = os.path.join(ref_dir, f)
+
+        elif m_single:
+            a = int(m_single.group(1))
+            ref_map[a] = os.path.join(ref_dir, f)
+
+        else:
+            print(f"[WARNING] Unknown reference filename format: {f}")
+
+    return ref_map, ref_files
+
+
+def ComputMask(
+                mem_dir,
+                ca_dir,
+                ref_dir,
+                out_dir,
+                config,
+                compute_cor_fn,
+                configPath,
+                T):
+    def overlay_ssim_map(ssim_map, img, alpha=0.5, gamma=0.3):
+        import numpy as np
+        import cv2
+
+        def process_slice(ssim_slice, img_slice):
+            diff = 1 - ssim_slice
+            diff_norm = (diff - diff.min()) / (diff.max() - diff.min() + 1e-8)
+            diff_enhanced = diff_norm ** gamma
+            img_norm = (img_slice - img_slice.min()) / (img_slice.max() - img_slice.min() + 1e-8)
+
+            heat = cv2.applyColorMap((diff_enhanced * 255).astype(np.uint8), cv2.COLORMAP_JET)
+            heat = heat[..., ::-1] / 255.0  # BGR → RGB
+
+            img_rgb = np.stack([img_norm]*3, axis=-1)
+
+            overlay = (1 - alpha) * img_rgb + alpha * heat
+            return overlay  # (H, W, 3)
+        if ssim_map.ndim == 2:
+            overlay = process_slice(ssim_map, img)
+            return overlay.transpose(2,0,1)[None]   
+        overlays = []
+        for z in range(ssim_map.shape[0]):
+            overlays.append(process_slice(ssim_map[z], img[z]))
+        overlays = np.array(overlays)      
+        overlays = overlays.transpose(3,0,1,2)
+        return overlays
+    mask_dir=os.path.join(out_dir,'mask')
+    overlay_dir=os.path.join(out_dir,'overlay')
+    os.makedirs(mask_dir,exist_ok=True)
+    os.makedirs(overlay_dir,exist_ok=True)
+    ref_map,ref_files=build_reference_index(ref_dir)
+    for i in range(T):
+        if i % 100 == 0:
+            print("Processed", i)
+        mem_i=IO.read_reg_tiff(mem_dir,i,1)
+        ca_i=IO.read_reg_tiff(ca_dir,i,0)
+        cor_i=compute_cor_fn(mem_i,ca_i)
+        ref_i=tifffile.imread(ref_map[i])
+
+        win_size=config['win_size']
+        use_3d=config['use_3d']
+        sigma_3d=config['sigma_3d']
+        mask_map=local_ssim_difference(cor_i,ref_i,win_size,use_3d,sigma_3d)
+        image_list=[ref_i,cor_i,mask_map]
+        IO.write_multichannel_volume_as_ome_tiff(image_list,os.path.join(out_dir,'mask'),
+                                                 i,configPath,'mask')
+        
