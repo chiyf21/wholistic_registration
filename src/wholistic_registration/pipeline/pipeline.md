@@ -15,3 +15,29 @@
 - 
 ... 
 
+## Results folder
+
+- registered data
+    - calcium
+    - membrane
+    - references
+        - labeled with timepoints that are associated with the reference
+
+- downsampled data
+    - calcium
+        - folder of tiffs (one per downsampled timepoint)
+        - contains downsampled calcium data
+        - channels: original data, registered data, reference used for that timepoint
+        
+    - membrane
+        - folder of tiffs (one per downsampled timepoint)
+        - contains downsampled membrane data
+        - channels: original data, registered data, reference used for that timepoint
+
+- mask
+    - folder of tiffs (one per timepoint)
+    - channels: mask
+
+- downsampled mask
+    - folder of tiffs (one per downsampled timepoint)
+    - channels: registered calcium data, registered membrane data, mask (all downsampled data)
