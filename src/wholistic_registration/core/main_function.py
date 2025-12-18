@@ -549,7 +549,6 @@ def Registration_v2(configPath='./configs/config.toml',
     import h5py
     # user-provided save function (assumed imported already)
     # from your_module import saveTiff_new
-
     # load config
     config = toml.load(configPath)
 
@@ -565,20 +564,16 @@ def Registration_v2(configPath='./configs/config.toml',
     downsampleZ = config['downsample']['downsampleZ']
     downsampleT = config['downsample']['downsampleT']
 
-    # compute XY,Z after downsample (X,Y are spatial dims)
-    X = int(SIZE[0] // downsampleXY)
-    Y = int(SIZE[1] // downsampleXY)
-
     if Dim == 3:
         if downsampleZ == -1:
-            Z_full = int(SIZE[2])
+            Z_full = int(SIZE[1])
             downsampleZ = list(range(Z_full))
             Z = Z_full
         else:
             Z = len(downsampleZ)
     else:
         Z = 1  # 2D treated as Z=1 for TIFF saving
-
+    # print(downsampleZ)
     # prepare output directories (one folder per channel)
     print("Preparing output directories...")
     out_mem = os.path.join(output_root, "membrane")
@@ -685,273 +680,126 @@ def Registration_v2(configPath='./configs/config.toml',
         # ---------------------------
         # Step B: process backward (from mid_start - 1 down to 0)
         # ---------------------------
-        print(f"Processing backward: frames {mid_start - downsampleT//2+1} to 0 step {downsampleT} ...")
+        
+        print(f"Processing backward: frames {mid_start - 1} to 0 with chunk size {downsampleT} ...")
         archors = []
         # initialize rolling window for reference windows (first chunk_size frames from mem_mid/ca_mid)
         ref_windows_mem = np.array(mem_mid_reg[0:chunk_size])
         ref_windows_ca  = np.array(ca_mid_reg[0:chunk_size])
 
+        ref_img = reference.compute_reference_from_block( ref_windows_mem, ref_windows_ca, config)
+        
         # iterate backwards in downsampleT steps
-        for idx in range(mid_start - downsampleT//2+1, -1, -downsampleT):
-            archors.append(idx)
-
-            mem_img = IO.readND2Frame(movingFilePath, idx, downsampleZ, channel=1, xy_down=downsampleXY, verbose=False)
-            ca_img  = IO.readND2Frame(movingFilePath, idx, downsampleZ, channel=0, xy_down=downsampleXY, verbose=False)
+        for idx in range(mid_start -1, -1, -downsampleT):
+            end_idx=idx
+            start_idx= max(0, end_idx-downsampleT)
+            print(f" Processing from frame {start_idx} to frame {end_idx} with reference picked from {idx+downsampleT+1} to {idx+downsampleT+1+chunk_size}")
+            frames_backward=list(range(start_idx,end_idx))
+            mem_img = IO.readND2Frame(movingFilePath, frames_backward, downsampleZ, channel=1, xy_down=downsampleXY, verbose=False)
+            ca_img  = IO.readND2Frame(movingFilePath, frames_backward, downsampleZ, channel=0, xy_down=downsampleXY, verbose=False)
             mem_img=np.squeeze(mem_img)
-            ca_img =np.squeeze(ca_img )
+            ca_img =np.squeeze(ca_img)
 
-            # register this frame using register_one_frame
-            mem_reg, ca_reg, ref_img, motion_reg = registration.register_one_frame(
-                configPath, mem_img, ca_img,
-                {"mem": ref_windows_mem, "ca": ref_windows_ca},
-                verbose=True, idx=idx
-            )
-            # save outputs for this single frame
-            IO.write_volume_as_ome_tiff(mem_reg, out_mem, channel_index_map['membrane'], idx,configPath)
-            IO.write_volume_as_ome_tiff(ca_reg, out_ca, channel_index_map['calcium'], idx,configPath)
+            # pick reference
+            ref_img=reference.compute_reference_from_block(ref_windows_mem,ref_windows_ca,config)
 
-            if save_ref and  downsampleT==1:
-                IO.write_volume_as_ome_tiff(ref_img, out_ref, 'ref', idx,configPath)
-            if save_motion:
-                mot_fname = os.path.join(out_mot, f"motion_{idx:06d}.h5")
-                with h5py.File(mot_fname, 'w') as hf:
-                    hf.create_dataset('motion', data=motion_reg, compression='gzip')
-                print(f"Saved {mot_fname} (motion field)")
-
-            # update rolling window: insert mem_reg / ca_reg at front, drop last
-            if chunk_size > 1:
-                ref_windows_mem[1:chunk_size] = ref_windows_mem[0:chunk_size-1]
-                ref_windows_mem[0] = mem_reg
-                ref_windows_ca[1:chunk_size] = ref_windows_ca[0:chunk_size-1]
-                ref_windows_ca[0] = ca_reg
+            if Dim == 3:
+                mem_backward_reg, ca_backward_reg, _, _, motion_mid = registration.wbi_registration_3d(
+                    mem_img, ca_img, configPath, ref_img, frame=start_idx
+                )
             else:
-                ref_windows_mem[0] = mem_reg
-                ref_windows_ca[0] = ca_reg
+                mem_backward_reg, ca_backward_reg, _, _, motion_mid = registration.wbi_registration_2d(
+                    mem_img, ca_img, configPath, ref_img, frame=start_idx
+                )
+            for k, frame_id in enumerate(frames_backward):
+                # membrane
+                mem_frame = mem_backward_reg[k]  # shape (Z,Y,X) or (Y,X)
+                IO.write_volume_as_ome_tiff(mem_frame, out_mem, channel_index_map['membrane'], frame_id,configPath)
+                # calcium
+                ca_frame = ca_backward_reg[k]
+                IO.write_volume_as_ome_tiff(ca_frame, out_ca, channel_index_map['calcium'], frame_id,configPath)
+                # reference (optional): ref_img is single 3D or 2D volume; save same ref for each frame in middle block
+
+                # motion (optional)
+                if save_motion:
+                    mot_frame = motion_mid[k]  # shape (Z,Y,X,3) or (Y,X,3)
+                    mot_fname = os.path.join(out_mot, f"motion_{frame_id:06d}.h5")
+                    with h5py.File(mot_fname, 'w') as hf:
+                        hf.create_dataset('motion', data=mot_frame, compression='gzip')
+                    print(f"Saved {mot_fname} (motion field)")
+            # save reference
+            if save_ref:
+                if Dim == 3:
+                    ref_frame = ref_img.copy()
+                else:
+                    ref_frame = ref_img.copy()
+                IO.write_volume_as_ome_tiff(ref_frame, out_ref, 'ref', f'{start_idx}~{end_idx}',configPath)  # filename will be vol_chref_xxx
+
+            # update rolling window
+            ref_windows_mem=np.array(mem_backward_reg[0:chunk_size])
+            ref_windows_ca = np.array(ca_backward_reg[0:chunk_size])
 
         # ---------------------------
-        # Step C: process forward (from mid_end to total_frames step downsampleT)
+        # Step C: process forward (from mid_end + 1 down to total_frames)
         # ---------------------------
-        print(f"Processing forward: frames {mid_end+ downsampleT//2} to {total_frames-1} step {downsampleT} ...")
-        # reinitialize rolling window from end of middle block
+        print(f"Processing forward: frames {mid_end+1} to {total_frames-1} with chunk size {downsampleT} ...")
+
+        # initialize rolling window from end of middle block
         ref_windows_mem = np.array(mem_mid_reg[-chunk_size:])
         ref_windows_ca  = np.array(ca_mid_reg[-chunk_size:])
 
+        # iterate forward in steps of downsampleT
         for idx in range(mid_end, total_frames, downsampleT):
-            archors.append(idx)
+            end_idx = min(idx + downsampleT - 1, total_frames - 1)
+            start_idx = idx
+            print(f" Processing from frame {start_idx} to frame {end_idx} with reference picked from {idx - chunk_size} to {idx}")
 
-            mem_img = IO.readND2Frame(movingFilePath, idx, downsampleZ, channel=1, xy_down=downsampleXY, verbose=False)
-            ca_img  = IO.readND2Frame(movingFilePath, idx, downsampleZ, channel=0, xy_down=downsampleXY, verbose=False)
-            mem_img=np.squeeze(mem_img)
-            ca_img =np.squeeze(ca_img )
+            # pick frame indices for this forward chunk
+            frames_forward = list(range(start_idx, min(start_idx + downsampleT, total_frames)))
+            
+            # read moving images
+            mem_img = IO.readND2Frame(movingFilePath, frames_forward, downsampleZ, channel=1, xy_down=downsampleXY, verbose=False)
+            ca_img  = IO.readND2Frame(movingFilePath, frames_forward, downsampleZ, channel=0, xy_down=downsampleXY, verbose=False)
+            mem_img = np.squeeze(mem_img)
+            ca_img  = np.squeeze(ca_img)
 
-            mem_reg, ca_reg, ref_img, motion_reg = registration.register_one_frame(
-                configPath, mem_img, ca_img,
-                {"mem": ref_windows_mem, "ca": ref_windows_ca},
-                verbose=True, idx=idx
-            )
+            # compute reference from current rolling window
+            ref_img = reference.compute_reference_from_block(ref_windows_mem, ref_windows_ca, config)
 
-            IO.write_volume_as_ome_tiff(mem_reg, out_mem, channel_index_map['membrane'], idx,configPath)
-            IO.write_volume_as_ome_tiff(ca_reg, out_ca, channel_index_map['calcium'], idx,configPath)
-            if save_ref and downsampleT==1:
-                IO.write_volume_as_ome_tiff(ref_img, out_ref, 'ref', idx,configPath)
-            if save_motion:
-                mot_fname = os.path.join(out_mot, f"motion_{idx:06d}.h5")
-                with h5py.File(mot_fname, 'w') as hf:
-                    hf.create_dataset('motion', data=motion_reg, compression='gzip')
-                print(f"Saved {mot_fname} (motion field)")
-
-            # update rolling window: shift left, append new reg at end
-            if chunk_size > 1:
-                ref_windows_mem[0:chunk_size-1] = ref_windows_mem[1:chunk_size]
-                ref_windows_mem[-1] = mem_reg
-                ref_windows_ca[0:chunk_size-1] = ref_windows_ca[1:chunk_size]
-                ref_windows_ca[-1] = ca_reg
-            else:
-                ref_windows_mem[0] = mem_reg
-                ref_windows_ca[0] = ca_reg
-
-    else:
-        import threading
-        backward_archors = []
-        forward_archors = []
-
-        def process_backward_on_gpu(gpu_id):
-            print(f"[Parallel] Backward on GPU{gpu_id}: frames {mid_start - downsampleT//2} → 0")
-
-            with cp.cuda.Device(gpu_id):
-                ref_windows_mem = np.array(mem_mid_reg[0:chunk_size])
-                ref_windows_ca  = np.array(ca_mid_reg[0:chunk_size])
-
-                for idx in range(mid_start - 1, -1, -downsampleT):
-                    backward_archors.append(idx)
-
-                    mem_img = IO.readND2Frame(movingFilePath, idx, downsampleZ, channel=1, 
-                                            xy_down=downsampleXY, verbose=False)
-                    ca_img  = IO.readND2Frame(movingFilePath, idx, downsampleZ, channel=0, 
-                                            xy_down=downsampleXY, verbose=False)
-                    mem_img = np.squeeze(mem_img)
-                    ca_img  = np.squeeze(ca_img)
-
-                    # register on GPU
-                    mem_reg, ca_reg, ref_img, motion_reg = registration.register_one_frame(
-                        configPath, mem_img, ca_img,
-                        {"mem": ref_windows_mem, "ca": ref_windows_ca},
-                        verbose=True, idx=idx
-                    )
-
-                    # save on CPU
-                    IO.write_volume_as_ome_tiff(mem_reg, out_mem, channel_index_map['membrane'], idx, configPath)
-                    IO.write_volume_as_ome_tiff(ca_reg, out_ca, channel_index_map['calcium'], idx, configPath)
-                    if save_ref and downsampleT==1:
-                        IO.write_volume_as_ome_tiff(ref_img, out_ref, 'ref', idx, configPath)
-                    if save_motion and downsampleT==1:
-                        mot_fname = os.path.join(out_mot, f"motion_{idx:06d}.h5")
-                        with h5py.File(mot_fname, 'w') as hf:
-                            hf.create_dataset('motion', data=motion_reg, compression='gzip')
-
-                    # update rolling window
-                    if chunk_size > 1:
-                        ref_windows_mem[1:chunk_size] = ref_windows_mem[0:chunk_size-1]
-                        ref_windows_mem[0] = mem_reg
-                        ref_windows_ca[1:chunk_size] = ref_windows_ca[0:chunk_size-1]
-                        ref_windows_ca[0] = ca_reg
-                    else:
-                        ref_windows_mem[0] = mem_reg
-                        ref_windows_ca[0] = ca_reg
-
-
-        def process_forward_on_gpu(gpu_id):
-            print(f"[Parallel] Forward on GPU{gpu_id}: frames {mid_end + downsampleT//2} → {total_frames-1}")
-
-            with cp.cuda.Device(gpu_id):
-                ref_windows_mem = np.array(mem_mid_reg[-chunk_size:])
-                ref_windows_ca  = np.array(ca_mid_reg[-chunk_size:])
-
-                for idx in range(mid_end, total_frames, downsampleT):
-                    forward_archors.append(idx)
-
-                    mem_img = IO.readND2Frame(movingFilePath, idx, downsampleZ, channel=1,
-                                            xy_down=downsampleXY, verbose=False)
-                    ca_img  = IO.readND2Frame(movingFilePath, idx, downsampleZ, channel=0,
-                                            xy_down=downsampleXY, verbose=False)
-                    mem_img = np.squeeze(mem_img)
-                    ca_img  = np.squeeze(ca_img)
-
-                    mem_reg, ca_reg, ref_img, motion_reg = registration.register_one_frame(
-                        configPath, mem_img, ca_img,
-                        {"mem": ref_windows_mem, "ca": ref_windows_ca},
-                        verbose=True, idx=idx
-                    )
-
-                    IO.write_volume_as_ome_tiff(mem_reg, out_mem, channel_index_map['membrane'], idx, configPath)
-                    IO.write_volume_as_ome_tiff(ca_reg, out_ca, channel_index_map['calcium'], idx, configPath)
-                    if save_ref and downsampleT==1:
-                        IO.write_volume_as_ome_tiff(ref_img, out_ref, 'ref', idx, configPath)
-                    if save_motion:
-                        mot_fname = os.path.join(out_mot, f"motion_{idx:06d}.h5")
-                        with h5py.File(mot_fname, 'w') as hf:
-                            hf.create_dataset('motion', data=motion_reg, compression='gzip')
-
-                    if chunk_size > 1:
-                        ref_windows_mem[:-1] = ref_windows_mem[1:]
-                        ref_windows_mem[-1] = mem_reg
-                        ref_windows_ca[:-1] = ref_windows_ca[1:]
-                        ref_windows_ca[-1]  = ca_reg
-                    else:
-                        ref_windows_mem[0] = mem_reg
-                        ref_windows_ca[0]  = ca_reg
-
-        # ======================================================================
-        # start parallel execution
-        t1 = threading.Thread(target=process_backward_on_gpu, args=(0,))
-        t2 = threading.Thread(target=process_forward_on_gpu, args=(1,))
-        t1.start()
-        t2.start()
-        t1.join()
-        t2.join()
-
-        archors = sorted(backward_archors + forward_archors)
-        print(archors)
-    # ---------------------------
-    # Step D: if downsampleT != 1, process full-resolution frames by blocks around anchors
-    # ---------------------------
-    if downsampleT != 1:
-        print("Processing full-resolution frames between anchors (filling downsample gaps)...")
-        # archors is list of frame indices that were processed (downsampled anchor frames)
-        # for each anchor, construct a window around anchor to process intermediate frames
-        for a in archors:
-            # compute start/end indices for this anchor (same logic as original)
-            start_idx = max(0, a - downsampleT // 2 )
-            end_idx = min(total_frames, a + downsampleT // 2)
-            # if start_idx<= downsampleT//2:
-            #     start_idx=0
-            # if  end_idx>= total_frames - downsampleT//2:
-            #     end_idx=total_frames
-
-            if end_idx <= mid_end and end_idx>=mid_start:
-                end_idx=mid_start
-            if start_idx >= mid_start and start_idx<=mid_end:
-                start_idx=mid_end
-
-            print(f"  Processing frames {start_idx}..{end_idx-1} using anchor {a}")
-
-            # build reference images for this anchor from previously saved anchor frames
-            # We need ref_mem/ref_ca as 3D for Dim==3 or 2D for Dim==2.
-            # The original code used mem_z[a].transpose((2,0,1)) because mem_z was T,Z,Y,X
-            # Now, we have stored files on disk; rather than reading them back, we can reconstruct
-            # by reading ND2 frames? But original intent: use the anchor's registered result as ref.
-            # To be consistent and avoid re-reading from disk, we'll re-generate ref_mem/ref_ca by
-            # reading the anchor-registered OME-TIFF we previously saved.
-            # For simplicity, here we read back the saved OME-TIFF for anchor 'a' (membrane and ca).
-            # This keeps logic consistent.
-            anchor_mem_tif = os.path.join(out_mem, f"vol_ch{channel_index_map['membrane']}_{a:06d}.tif")
-            anchor_ca_tif  = os.path.join(out_ca, f"vol_ch{channel_index_map['calcium']}_{a:06d}.tif")
-            try:
-
-                anchor_mem = tifffile.imread(anchor_mem_tif)  # this will return (Z,Y,X) or (Y,X)
-                anchor_ca  = tifffile.imread(anchor_ca_tif)
-            except Exception as e:
-                print(f"  WARNING: failed to read anchor tiff {anchor_mem_tif} or {anchor_ca_tif}: {e}")
-                # fallback: read from ND2 and register a small block centered at anchor
-                anchor_mem = IO.readND2Frame(movingFilePath, [a], downsampleZ, channel=1, xy_down=downsampleXY, verbose=False)[0]
-                anchor_ca  = IO.readND2Frame(movingFilePath, [a], downsampleZ, channel=0, xy_down=downsampleXY, verbose=False)[0]
-
-            # if dual_channel, compose reference image (same as original)
-            if config.get('channels', {}).get('dual_channel', False):
-                # expect registration.transform exists
-                ref_img_anchor = anchor_mem + registration.transform(anchor_ca, config['channels']['k'], config['channels']['function'])
-            else:
-                ref_img_anchor = anchor_mem
-
-            # now read the actual ND2 frames covering [start_idx, end_idx)
-            frames_processing = list(range(start_idx, end_idx))
-            mem_block = IO.readND2Frame(movingFilePath, frames_processing, downsampleZ, channel=1, xy_down=downsampleXY, verbose=False)
-            ca_block  = IO.readND2Frame(movingFilePath, frames_processing, downsampleZ, channel=0, xy_down=downsampleXY, verbose=False)
-            mem_block=np.squeeze(mem_block)
-            ca_block =np.squeeze(ca_block )
-            # run registration on this block (multi-frame)
+            # registration
             if Dim == 3:
-                mem_reg_block, ca_reg_block, _, _, motion_block = registration.wbi_registration_3d(
-                    mem_block, ca_block, configPath, ref_img_anchor, frame=start_idx
+                mem_forward_reg, ca_forward_reg, _, _, motion_forward = registration.wbi_registration_3d(
+                    mem_img, ca_img, configPath, ref_img, frame=start_idx
                 )
             else:
-                mem_reg_block, ca_reg_block, _, _, motion_block = registration.wbi_registration_2d(
-                    mem_block, ca_block, configPath, ref_img_anchor, frame=start_idx
+                mem_forward_reg, ca_forward_reg, _, _, motion_forward = registration.wbi_registration_2d(
+                    mem_img, ca_img, configPath, ref_img, frame=start_idx
                 )
-            if save_ref:
-                IO.write_volume_as_ome_tiff(ref_img_anchor, out_ref, 'ref', f"{start_idx}~{end_idx}",configPath)
-            # save each frame in this block
-            for k, fi in enumerate(frames_processing):
-                IO.write_volume_as_ome_tiff(mem_reg_block[k], out_mem, channel_index_map['membrane'], fi,configPath)
-                IO.write_volume_as_ome_tiff(ca_reg_block[k], out_ca, channel_index_map['calcium'], fi,configPath)
 
+            # save results
+            for k, frame_id in enumerate(frames_forward):
+                # membrane
+                IO.write_volume_as_ome_tiff(mem_forward_reg[k], out_mem, channel_index_map['membrane'], frame_id, configPath)
+                # calcium
+                IO.write_volume_as_ome_tiff(ca_forward_reg[k], out_ca, channel_index_map['calcium'], frame_id, configPath)
+                # motion
                 if save_motion:
-                    mot_fname = os.path.join(out_mot, f"motion_{fi:06d}.h5")
+                    mot_fname = os.path.join(out_mot, f"motion_{frame_id:06d}.h5")
                     with h5py.File(mot_fname, 'w') as hf:
-                        hf.create_dataset('motion', data=motion_block[k], compression='gzip')
+                        hf.create_dataset('motion', data=motion_forward[k], compression='gzip')
                     print(f"Saved {mot_fname} (motion field)")
 
-    print("Registration completed. All outputs saved to:", output_root)
+            # save reference
+            if save_ref:
+                if Dim == 3:
+                    ref_frame = ref_img.copy()
+                else:
+                    ref_frame = ref_img.copy()
+                IO.write_volume_as_ome_tiff(ref_frame, out_ref, 'ref', f'{start_idx}~{end_idx}',configPath)  # filename will be vol_chref_xxx
+
+            # update rolling window
+            ref_windows_mem=np.array(mem_forward_reg[-chunk_size:])
+            ref_windows_ca = np.array(ca_forward_reg[-chunk_size:])
 
 def create_downsample_dataset(
     configPath='./configs/config.toml',
