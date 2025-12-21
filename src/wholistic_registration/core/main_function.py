@@ -164,9 +164,10 @@ def DefineParams(
         framerate=meta['fps']
         zRatio=meta['zRatio']
 
-    print("Saving the config")
+    
     ## load the default config file
     import os
+    print("Loading the default config file")
     current_dir = os.path.dirname(os.path.abspath(__file__))
     config_path = os.path.join(os.path.dirname(current_dir), 'configs', 'config_default.toml')
     config=toml.load(config_path)
@@ -225,12 +226,14 @@ def DefineParams(
     config['Reliable_Analysis']['temporalMaskThres']=temporalMaskThres
     config['Reliable_Analysis']['spatialMaskThres']=-spatialMaskThres
 
-    #change the pyramid config
-    config['save_config']['save_ref']=save_ref
-    config['save_config']['save_motion']=save_motion
-    with open(configFile,'w') as f:
-        toml.dump(config,f)
+    # change the pyramid config
+    config['save_config']['save_ref'] = save_ref
+    config['save_config']['save_motion'] = save_motion
 
+    print("Config created =====> Saving the config")
+    with open(configFile, "w") as f:
+        toml.dump(config, f)
+    print("Config saved =====> Done")
     if verbose == True:
         print("\nConfiguration summary:")
         print("--------------------------------------------------")
