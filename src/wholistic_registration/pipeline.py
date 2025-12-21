@@ -17,24 +17,27 @@ main_function.DefineParams(
     verbose=False
 )
 
-## Do registration
-main_function.Registration(
-    './configs/config.toml'
-)
+# # Do registration
+# main_function.Registration_v2(
+#     './wbi_1201/configs/config.toml',
+#     parallel=False
+# )
 
-## create downsample data
-main_function.create_downsample_dataset(
-    './configs/config.toml',
-    downsampleFilePath='./registrated_data/f338_registrated_downsample.zarr',
-    ds_XY=4,
-    ds_T=4
-)
+# # create downsample data
+# main_function.create_downsample_dataset_v2(
+#     './wbi_1201/configs/config.toml',
+#     downsampleFilePath='./registrated_data/f338_1218registrated_downsample/',
+#     ds_XY=4,
+#     ds_T=5,
+#     block_size=10
+# )
 
-## reliable analysis
+# ## reliable analysis
 main_function.ReliableAnalysis(
-    './wbi_1201/configs/config.toml'
+    './wbi_1201/configs/config.toml',
+    ds_XY=4,
+    ds_T=5
 )
-
 ##reference comparation
-main_function.ReferenceComparation( './wbi_1201/configs/config.toml')
+#main_function.ReferenceComparation( './wbi_1201/configs/config.toml')
 
