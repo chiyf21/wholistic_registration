@@ -1117,7 +1117,9 @@ def create_downsample_dataset_v2(
     print("[ALL DONE] Downsampled dataset created successfully.")
 
 def ReliableAnalysis(
-    configPath: str = None
+    configPath: str = None,
+    ds_XY: int = 4,
+    ds_T: int = 2,
 ):
     """
     Main entry function for computing spatial, temporal, and accumulative
@@ -1172,7 +1174,10 @@ def ReliableAnalysis(
         config['Reliable_Analysis'],
         compute_cor_fn,
         configPath,
-        T)
+        T,
+        ds_XY,
+        ds_T
+    )
 
 def ReferenceComparation(configPath: str = None) :
     import re
