@@ -690,10 +690,10 @@ def Registration_v2(configPath='./configs/config.toml',
         ref_img = reference.compute_reference_from_block( ref_windows_mem, ref_windows_ca, config)
         
         # iterate backwards in downsampleT steps
-        for idx in range(mid_start -1, -1, -downsampleT):
+        for idx in range(mid_start , -1, -downsampleT):
             end_idx=idx
             start_idx= max(0, end_idx-downsampleT)
-            print(f" Processing from frame {start_idx} to frame {end_idx} with reference picked from {idx+downsampleT+1} to {idx+downsampleT+1+chunk_size}")
+            print(f" Processing from frame {start_idx} to frame {end_idx} with reference picked from {end_idx+1} to {end_idx+1+chunk_size}")
             frames_backward=list(range(start_idx,end_idx))
             mem_img = IO.readND2Frame(movingFilePath, frames_backward, downsampleZ, channel=1, xy_down=downsampleXY, verbose=False)
             ca_img  = IO.readND2Frame(movingFilePath, frames_backward, downsampleZ, channel=0, xy_down=downsampleXY, verbose=False)
