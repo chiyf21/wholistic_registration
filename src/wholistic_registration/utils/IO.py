@@ -13,6 +13,7 @@ Overview:
 functions:
     - readMeta(filePath, Ifprint=True): Reads metadata from an ND2 file and optionally prints Z ratio and data size.
     - readFrame(filePath, frame, channel=0, to_memory=True): Reads specified frames from an ND2 file, supporting both single and multiple frame requests, and handles 5D data structures.
+    - downsample_tiff_series(tiff_folder_or_list, xy_down=4, batch_processing=False, batch_size=50, verbose=True): Efficiently downsample a series of TIFF files using dask for lazy loading and parallel processing.
     
 '''
 import nd2
@@ -21,6 +22,12 @@ import toml
 import tifffile
 import json
 import zarr
+import dask
+import dask.array as da
+import dask.delayed
+from glob import glob
+import os
+import time
 
 def readMeta(filePath,Ifprint=True):
     """
@@ -276,6 +283,166 @@ def downsample(data_tzcyx, xy_down=4):
     data_tzcyx = data_tzcyx.reshape(T, Z, C, newY // xy_down, xy_down, newX // xy_down, xy_down)
     data_tzcyx = data_tzcyx.mean(axis=(4, 6))
     return data_tzcyx
+
+def downsample_tiff_series(tiff_folder_or_list, xy_down=4, batch_processing=False, batch_size=50, verbose=True):
+    """
+    Efficiently downsample a series of TIFF files using dask for lazy loading and parallel processing.
+    
+    Parameters:
+        tiff_folder_or_list (str or list): Either a folder path containing TIFF files, 
+                                          or a list of TIFF file paths
+        xy_down (int): Downsampling factor for X and Y dimensions. Default is 4.
+        batch_processing (bool): If True, process TIFFs in batches for very large datasets.
+                               If False, process all at once. Default is False.
+        batch_size (int): Number of TIFFs to process in each batch when batch_processing=True.
+                         Default is 50.
+        verbose (bool): Whether to print progress information. Default is True.
+    
+    Returns:
+        dask.array: Downsampled data array with shape (T, Z, C, Y_ds, X_ds) where T is time,
+                   Z is depth, C is channel, and Y_ds/X_ds are downsampled spatial dimensions.
+                   Call .compute() on the result to get the actual numpy array.
+    
+    Example:
+        # Process all TIFFs in a folder
+        result = downsample_tiff_series("/path/to/tiff/folder", xy_down=4)
+        downsampled_data = result.compute()
+        
+        # Process a specific list of TIFF files
+        tiff_files = ["/path/to/file1.tif", "/path/to/file2.tif"]
+        result = downsample_tiff_series(tiff_files, xy_down=2)
+        
+        # For very large datasets, use batch processing
+        result = downsample_tiff_series("/path/to/large/dataset", 
+                                       xy_down=4, batch_processing=True, batch_size=100)
+    """
+    
+    # Handle input: folder path or list of files
+    if isinstance(tiff_folder_or_list, str):
+        if os.path.isdir(tiff_folder_or_list):
+            tiff_files = glob(os.path.join(tiff_folder_or_list, "*.tif"))
+            tiff_files.extend(glob(os.path.join(tiff_folder_or_list, "*.tiff")))
+            tiff_files.sort()  # Ensure consistent ordering
+        else:
+            raise ValueError(f"Directory not found: {tiff_folder_or_list}")
+    elif isinstance(tiff_folder_or_list, list):
+        tiff_files = tiff_folder_or_list
+    else:
+        raise ValueError("Input must be either a directory path or a list of TIFF file paths")
+    
+    if len(tiff_files) == 0:
+        raise ValueError("No TIFF files found")
+    
+    if verbose:
+        print(f"Found {len(tiff_files)} TIFF files")
+    
+    # Read one TIFF to get the shape and dtype
+    sample_data = tifffile.imread(tiff_files[0])
+    if verbose:
+        print(f"Sample TIFF shape: {sample_data.shape}, dtype: {sample_data.dtype}")
+    
+    @dask.delayed
+    def load_tiff(tiff_path):
+        """Load a single TIFF file"""
+        return tifffile.imread(tiff_path)
+    
+    if not batch_processing:
+        # Process all TIFFs at once (recommended for moderate datasets)
+        if verbose:
+            print("Processing all TIFFs at once...")
+        
+        # Create delayed objects for each TIFF
+        delayed_arrays = [load_tiff(tiff) for tiff in tiff_files]
+        
+        # Convert to dask arrays and stack them with optimal chunking
+        if len(sample_data.shape) == 3:  # 3D TIFFs (Z, Y, X)
+            Z, Y, X = sample_data.shape
+            # Chunk size: process a few timepoints at once, keep spatial dims manageable
+            chunk_t = min(4, len(tiff_files))
+            dask_arrays = [da.from_delayed(delayed_arr, shape=(Z, Y, X), dtype=sample_data.dtype) 
+                          for delayed_arr in delayed_arrays]
+            # Stack along time axis to create (T, Z, Y, X)
+            data_tzyx = da.stack(dask_arrays, axis=0)
+            # Rechunk for better performance: chunk along time, keep spatial dims together
+            data_tzyx = data_tzyx.rechunk((chunk_t, Z, Y//2, X//2))
+            # Add channel dimension to make it (T, Z, C, Y, X) for downsample
+            data_tzcyx = data_tzyx[:, :, None, :, :]
+        else:  # 2D TIFFs (Y, X)
+            Y, X = sample_data.shape
+            # Process more 2D timepoints at once
+            chunk_t = min(8, len(tiff_files))
+            dask_arrays = [da.from_delayed(delayed_arr, shape=(Y, X), dtype=sample_data.dtype) 
+                          for delayed_arr in delayed_arrays]
+            # Stack along time axis to create (T, Y, X)
+            data_tyx = da.stack(dask_arrays, axis=0)
+            # Rechunk for better performance
+            data_tyx = data_tyx.rechunk((chunk_t, Y//2, X//2))
+            # Add Z and C dimensions to make it (T, Z, C, Y, X) for downsample
+            data_tzcyx = data_tyx[:, None, None, :, :]
+        
+        if verbose:
+            print(f"Dask array shape: {data_tzcyx.shape}")
+            print(f"Dask array chunks: {data_tzcyx.chunks}")
+        
+        # Downsample using the existing downsample function
+        data_ds = downsample(data_tzcyx, xy_down=xy_down)
+        
+        if verbose:
+            print(f"Downsampled shape: {data_ds.shape}")
+        
+        return data_ds
+    
+    else:
+        # Batch processing for very large datasets
+        if verbose:
+            print(f"Processing TIFFs in batches of {batch_size}...")
+        
+        results = []
+        num_batches = (len(tiff_files) + batch_size - 1) // batch_size
+        
+        for i in range(0, len(tiff_files), batch_size):
+            batch_tiffs = tiff_files[i:i+batch_size]
+            batch_num = i // batch_size + 1
+            
+            if verbose:
+                print(f"Processing batch {batch_num}/{num_batches} ({len(batch_tiffs)} files)")
+            
+            # Create delayed objects for this batch
+            batch_delayed = [load_tiff(tiff) for tiff in batch_tiffs]
+            
+            # Convert to dask arrays and stack
+            if len(sample_data.shape) == 3:  # 3D TIFFs
+                Z, Y, X = sample_data.shape
+                batch_arrays = [da.from_delayed(delayed_arr, shape=(Z, Y, X), dtype=sample_data.dtype) 
+                               for delayed_arr in batch_delayed]
+                batch_data = da.stack(batch_arrays, axis=0)[:, :, None, :, :]
+            else:  # 2D TIFFs
+                Y, X = sample_data.shape
+                batch_arrays = [da.from_delayed(delayed_arr, shape=(Y, X), dtype=sample_data.dtype) 
+                               for delayed_arr in batch_delayed]
+                batch_data = da.stack(batch_arrays, axis=0)[:, None, None, :, :]
+            
+            # Downsample this batch
+            batch_ds = downsample(batch_data, xy_down=xy_down)
+            
+            # Compute and store result
+            batch_result = batch_ds.compute()
+            results.append(batch_result)
+            
+            if verbose:
+                print(f"Batch {batch_num} completed, shape: {batch_result.shape}")
+        
+        # Concatenate all batch results and convert back to dask array
+        final_result = np.concatenate(results, axis=0)
+        if verbose:
+            print(f"Final concatenated result shape: {final_result.shape}")
+        
+        # Convert back to dask array for consistency
+        return da.from_array(final_result, chunks=(min(8, final_result.shape[0]), 
+                                                  final_result.shape[1], 
+                                                  final_result.shape[2], 
+                                                  final_result.shape[3]//2, 
+                                                  final_result.shape[4]//2))
 
 def saveTiff(image_list, config_path, save_path):
     """
