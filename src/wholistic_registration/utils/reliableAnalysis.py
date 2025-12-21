@@ -615,7 +615,10 @@ def ComputMask(
                 config,
                 compute_cor_fn,
                 configPath,
-                T):
+                T,
+                downsampleXY=1,
+                downsampleT=1
+):
     def overlay_ssim_map(ssim_map, img, alpha=0.5, gamma=0.3):
         import numpy as np
         import cv2
@@ -662,4 +665,23 @@ def ComputMask(
         image_list=[ref_i,cor_i,mask_map]
         IO.write_multichannel_volume_as_ome_tiff(image_list,os.path.join(out_dir,'mask'),
                                                  i,configPath,'mask')
-        
+        if i % downsampleT == 0:
+            image_list_ds=[
+                            np.squeeze(
+                                IO.downsample(
+                                    np.expand_dims(np.expand_dims(ref_i, axis=1), axis=0),
+                                    downsampleXY)
+                                    ),
+                            np.squeeze(
+                                IO.downsample(
+                                    np.expand_dims(np.expand_dims(cor_i, axis=1), axis=0),
+                                    downsampleXY)
+                                    ),
+                            np.squeeze(
+                                IO.downsample(
+                                    np.expand_dims(np.expand_dims(mask_map, axis=1), axis=0),
+                                    downsampleXY)
+                                    )
+                           ]
+            IO.write_multichannel_volume_as_ome_tiff(image_list_ds,mask_ds_dir,
+                                                 i,configPath,'mask')
