@@ -17,11 +17,13 @@ main_function.DefineParams(
     verbose=False
 )
 
-# # Do registration
-# main_function.Registration_v2(
-#     './wbi_1201/configs/config.toml',
-#     parallel=False
-# )
+## read in parameters from the config file
+# config = toml.load('./configs/config.toml') # TBD
+
+## Do registration
+main_function.Registration(
+    './configs/config.toml'
+)
 
 # # create downsample data
 # main_function.create_downsample_dataset_v2(
@@ -31,6 +33,15 @@ main_function.DefineParams(
 #     ds_T=5,
 #     block_size=10
 # )
+## create downsample data
+main_function.create_downsample_dataset(
+    './configs/config.toml',
+    downsampleFilePath='./registrated_data/f338_registrated_downsample.zarr',
+    ds_XY=4,
+    ds_T=4
+)
+
+
 
 # ## reliable analysis
 main_function.ReliableAnalysis(
