@@ -1,12 +1,12 @@
-from utils import IO,reference,registration
+from wholistic_registration.utils import IO,reference,registration
 import zarr
 import toml
 import numpy as np
 from skimage.transform import resize
 from numcodecs import Blosc
-from utils.reliableAnalysis import gradient_amplitude,compute_spatial_mask,compute_temporal_and_accumula_masks
+from wholistic_registration.utils.reliableAnalysis import gradient_amplitude,compute_spatial_mask,compute_temporal_and_accumula_masks
 import  os
-from utils import imresize
+from wholistic_registration.utils import imresize
 import tifffile
 
 def DefineParams(
