@@ -12,14 +12,14 @@ Overview:
     This script implements motion correction and related opreations using a multi-scale approach.
     The primary goal is to registrate the moving image to a reference image using a GPU-accelerated method.
     Our alghothm is based on optical flow methods.We use a Anisotropic(only x and y directions have scaling change) Pyramid method to capture the large displayment between the moving image and the reference image.
-    At the same time,we assumpt the motion field is smooth and continuous.So we calculate the motion of control points with the LK method.At the same time we add a smoothness penalty to the objective function,so that we can get a smooth motion field on each voxel.
+    At the same time,we assume the motion field is smooth and continuous. So we calculate the motion of control points with the LK method. At the same time we add a smoothness penalty to the objective function,so that we can get a smooth motion field on each voxel.
     Eventually,we construct an iterative method to get the final motion field.
 
     
 Functions:
-    - correctMotionGrid: Correct the motion using 3D interpolation for GPU arrays.
-    - getNeiDiff: Calculate the neighbor difference using a filter.
-    - calError: Calculate the error and penalty terms for the given 3D data.
+    - correctMotionGrid: Correct the motion using 3D interpolation for GPU arrays. Given raw data and the motion field, we can get the data at the new coordinates.
+    - getNeiDiff: Calculate the neighbor difference using a filter. This is used to add a smoothness penalty to the objective function.
+    - calError: Calculate the error and penalty terms for the given 3D data. This is used to check the convergence of the algorithm.
     - getSpatialGradientInOrgGrid: Calculate the spatial gradient in the original image using 3D interpolation.
     - getFlow3_withPenalty6: Compute the flow with penalty and 3x3 matrix determinant.
     - compute_new_grid:do the normalization to the origin grid to let the coordinates of control points are integer.
