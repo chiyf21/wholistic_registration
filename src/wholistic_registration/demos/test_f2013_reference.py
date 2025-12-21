@@ -417,7 +417,7 @@ tmp = tmp
 
 from wholistic_registration.utils import preprocess
 reload(preprocess)
-sigma_xy = 3
+sigma_xy = 6
 r = sigma_xy*2
 eps = 1e-6
 edges = np.array([preprocess.michelson_edge_map(frame[0,:,:], sigma_xy=sigma_xy, r=r, eps=eps)[None] for frame in tmp])
