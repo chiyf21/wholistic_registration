@@ -1,0 +1,62 @@
+[MetaData]
+zRatio = 27.69230769230769
+SIZE = [ 1598, 13, 2, 1708, 2304,]
+frames = 1598
+nchannels = 2
+Dim = 3
+voxelsize = [ 0.325, 0.325, 9.0,]
+fps = 0.2625751889596584
+spacing_x = 0.325
+spacing_y = 0.325
+spacing_z = 9.0
+
+[downsample]
+downsampleXY = 1
+downsampleT = 100
+downsampleZ = [ 5, 6, 7,]
+
+[file_path]
+input_path = "/home/cyf/wbi/Virginia/f338/221124_f338_ubi_gCaMP7f_bactin_mCherry_CAAX_7dpf002.nd2"
+registrated_path = "./registrated_data/f338_1218registrated/"
+mask_path = "./registrated_data/f338_mask/"
+
+[channels]
+dual_channel = true
+function = "log10"
+k = 0
+
+[reference]
+pick_reference_auto = false
+chunk_size = 50
+mid_chunk_size = 400
+
+[preprocess]
+normalize_to_0_255 = false
+normailize_to_0_255 = false
+
+[mask]
+thresFactor = 5
+maskRange = [ 5, 4000,]
+
+[pyramid]
+layer = 3
+r = 5
+iter = 10
+smoothPenalty = 0.08
+
+[Reliable_Analysis]
+n = 20
+n2 = 20
+n3 = 40
+sigma = 1
+sigma2 = 10.0
+decay = 0.99
+temporalMaskThres = 3
+spatialMaskThres = 0
+win_size=11
+use_3d=false
+sigma_3d=1.5
+
+[save_config]
+save_ref = true
+save_motion = false
