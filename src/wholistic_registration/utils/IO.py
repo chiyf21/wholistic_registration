@@ -174,7 +174,7 @@ def getTotalFrames(filePath):
     return frame
 
 
-def readND2Frame(filePath, frames, slices=None, channel=0, xy_down=1, to_memory=True):
+def readND2Frame(filePath, frames, slices=None, channel=0, xy_down=1, to_memory=True,verbose=False):
     """
     ND2 reader with high-quality XY downsampling:
       - Z slice selection (via `slices`)
@@ -213,7 +213,7 @@ def readND2Frame(filePath, frames, slices=None, channel=0, xy_down=1, to_memory=
         sizes = f.sizes
         dims = list(sizes.keys())
         is_5d = len(dims) == 5
-        metadata = readMeta_new(filePath)
+        metadata = readMeta_new(filePath,Ifprint=verbose)
         nframes = metadata['nframes']
         nchannels = metadata['nchannels']
         nzpix = metadata['nzpix']
@@ -226,13 +226,13 @@ def readND2Frame(filePath, frames, slices=None, channel=0, xy_down=1, to_memory=
         multiframe = True if nframes > 1 else False
         multiz = True if nzpix > 1 else False
         multichannel = True if nchannels > 1 else False
-
-        print(f"multiframe is {multiframe}")
-        print(f"multiz is {multiz}")
-        print(f"multichannel is {multichannel}")
-        print(f"nframes is {nframes}")
-        print(f"nzpix is {nzpix}")
-        print(f"nchannels is {nchannels}")
+        if verbose:
+            print(f"multiframe is {multiframe}")
+            print(f"multiz is {multiz}")
+            print(f"multichannel is {multichannel}")
+            print(f"nframes is {nframes}")
+            print(f"nzpix is {nzpix}")
+            print(f"nchannels is {nchannels}")
         
         # Add dimensions if they don't exist to ensure 5D structure
         if not multiframe:
@@ -243,7 +243,8 @@ def readND2Frame(filePath, frames, slices=None, channel=0, xy_down=1, to_memory=
         
         if not multichannel:
             dask_data = dask_data[:, :, None]  # Add C dimension
-        print(f"After adding dimensions: dask_data.shape = {dask_data.shape}, len(data.shape) = {len(dask_data.shape)}")
+        if verbose:
+            print(f"After adding dimensions: dask_data.shape = {dask_data.shape}, len(data.shape) = {len(dask_data.shape)}")
 
         # Apply indexing while preserving dimensions
         dask_data = dask_data[frames, ...]
@@ -254,11 +255,11 @@ def readND2Frame(filePath, frames, slices=None, channel=0, xy_down=1, to_memory=
         if len(dask_data.shape) != 5:
             raise ValueError(f"After slicing: dask_data.shape = {dask_data.shape}, len(data.shape) = {len(dask_data.shape)}")
         
-        
-        print(f"After slicing: dask_data.shape = {dask_data.shape}")
+        if verbose:
+            print(f"After slicing: dask_data.shape = {dask_data.shape}")
 
-        print(f"dask_data.shape is {dask_data.shape}")
-        
+            print(f"dask_data.shape is {dask_data.shape}")
+            
 
         T, Z, C, Y, X = dask_data.shape
 
@@ -266,7 +267,8 @@ def readND2Frame(filePath, frames, slices=None, channel=0, xy_down=1, to_memory=
         # XY downsample using binning/averaging (dask-native)
         # ------------------------------------
         if xy_down > 1:
-            print(f"Downsampling data by {xy_down}x")
+            if verbose:
+                print(f"Downsampling data by {xy_down}x")
             dask_data = downsample(dask_data, xy_down)
 
         # Only compute at the very end if requested
@@ -674,7 +676,7 @@ def write_volume_as_ome_tiff(volume, out_dir, ch_idx, frame_idx, configPath,
         raise ValueError("volume must be 2D or 3D (Z,Y,X)")
     img5d = zvol[np.newaxis, :, np.newaxis, :, :]  # (1,Z,1,Y,X)
     os.makedirs(out_dir, exist_ok=True)
-    fname = os.path.join(out_dir, f"vol_ch{ch_idx}_{frame_tag}.tif")
+    fname = os.path.join(out_dir, f"vol_{ch_idx}_{frame_tag}.tif")
     metadata = {
         'spacing_x': spacing_x,
         'spacing_y': spacing_y,
@@ -688,10 +690,10 @@ def write_volume_as_ome_tiff(volume, out_dir, ch_idx, frame_idx, configPath,
 def write_multichannel_volume_as_ome_tiff(volume, out_dir, frame_idx, configPath,label=None,
                                           spacing_x=1.0, spacing_y=1.0):
     """
-    vol3d_list: list of 3 arrays, each (Z,Y,X)
+    volume: list of c arrays, each (Z,Y,X)
         ch0, ch1, ch2
 
-    输出 OME TIFF shape: (1, Z, 3, Y, X)
+    output OME TIFF shape: (1, Z, c, Y, X)
     """
 
 
@@ -705,12 +707,11 @@ def write_multichannel_volume_as_ome_tiff(volume, out_dir, frame_idx, configPath
             v = v.astype(np.float32)
         processed.append(v)
 
-    Z, Y, X = processed[0].shape
     img5d = np.stack(processed, axis=0)     # (3, Z, Y, X)
     img5d = img5d[np.newaxis, :, :, :, :]   # (1,3,Z,Y,X)
     img5d = np.transpose(img5d, (0, 2, 1, 3, 4))  # → (1,Z,3,Y,X)
 
-    fname = os.path.join(out_dir, f"vol_{frame_idx:06d}_{label}.tif")
+    fname = os.path.join(out_dir, f"vol_{label}_{frame_idx:06d}.tif")
 
     metadata = {
         'spacing_x': spacing_x,

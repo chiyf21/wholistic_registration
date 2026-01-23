@@ -1,27 +1,29 @@
-from wholistic_registration.utils import IO,reference,registration
-import zarr
+from utils import IO,reference,registration
 import toml
 import numpy as np
-from skimage.transform import resize
-from numcodecs import Blosc
-from wholistic_registration.utils.reliableAnalysis import gradient_amplitude,compute_spatial_mask,compute_temporal_and_accumula_masks
-import  os
-from wholistic_registration.utils import imresize
+import os
+import shutil
 import tifffile
+import h5py
+import multiprocessing as mp
 
+
+####################################################################################################################
+##  Define the parameters
 def DefineParams(
                 configFile='./configs/config.toml',
                 inputFile=None,
                 outputFile=None,
-                maskFile=None,
                 downsampleXY=1,
-                downsampleT=1,
-                downsampleZ=1,
+                downsampleZ=-1,
                 dual_channel=False,
-                function=None,
+                function='raw',
                 k=0.,
-                chunk_size=50,
-                mid_chunk_size=100,
+                batch_size=100,
+                mid_window_size=100,
+                window_size=1,
+                mid_stride=10,
+                referece_chunk=50,
                 preprocess=False,
                 thresFactor=5,
                 maskRange=[5,4000],
@@ -29,40 +31,48 @@ def DefineParams(
                 r=5,
                 iter=10,
                 smoothPenalty=0.08,
+                tolerance=1e-3,
+                win_size=11,
+                use_3d=False,
+                sigma_3d=1.5,
                 save_ref=True,
                 save_motion=False,
-                n=20,
-                n2=20,
-                n3=40,
-                sigma=3,
-                sigma2=10.0,
-                decay=0.99,
-                temporalMaskThres=3,
-                spatialMaskThres=-1,
                 verbose=True
 ):
     '''
+    General parameters:
+    -configFile
+        Path to the configuration file. Default: './configs/config.toml'
+    -inputFile
+        Path to the input ND2 file containing the video data.
+    -outputFile
+        Path to the output directory where registered data will be saved.
+    -preprocess
+        Whether to normalize images to the range [0, 255]. Default: False
+    -save_ref
+        Whether to save reference images. Default: True
+    -save_motion
+        Whether to save motion fields. Default: False
+    -verbose
+        Whether to print detailed information during processing. Default: True
+
     [downsample]
     Params:
     -downsampleXY
         The coefficient of the downsampling on X or Y dimension.
-        If downsampleX = 4 & origin shape of 1 slice is (X,Y), then after downsampleing the shape should be (X/4,Y/4)
-    -downsampleT
-        Sometimes we need to process the time downsample data first to overcome the large displacement when the time rate is small
-        After processing the time downsample data, we can registrate the left data to them which has been registrated.
-        If downsampleT = 10, we will pick frames like 1,11,21,31,etc first, and then we will registrate frame 2~5 to frame 1 ,frame 6~15 to frame 11 and so on.
-    -downsample Z
-        An list of the z silces we will use.
-        If downsampleZ=[4,5,6,7], we will use the 5th, 6th, 7th, 8th silces of the whole data.
-        If downsampleZ=None, we will use all of the z slices 
+        If downsampleXY = 4 & origin shape of 1 slice is (X,Y), then after downsampling the shape should be (X/4,Y/4)
+    -downsampleZ
+        A list of the z slices we will use.
+        If downsampleZ=[4,5,6,7], we will use the 5th, 6th, 7th, 8th slices of the whole data.
+        If downsampleZ=-1, we will use all of the z slices 
 
     [channels]
     Params:
     -dual_channel
-        Whether use two channels to do registration
-        If true,we will use the "membrane_channel+k*function(Ca_channel)" to do registration
+        Whether to use two channels to do registration
+        If true, we will use the "membrane_channel+k*function(Ca_channel)" to do registration
     -function
-        The method we process the Ca_channel.It can be "sqrt","log2","log10" or "raw"
+        The method we process the Ca_channel. It can be: "sqrt", "log2", "log10" or "raw"
         "sqrt": square root
         "log2": log2(1+x)
         "log10": log10(1+x)
@@ -86,12 +96,15 @@ def DefineParams(
         Whether pick the reference image from moving image
         If true, it will pick the reference image from the moving video each several frames
         If false, you need to give a reference image
-    -chunk_size
-        The size of frames we will use to update the reference
-    -mid_chunk_size
-        The size of frames we will use to pick the initial reference from the middle block
+    -window_size
+        The size of time(minutes, frames / frame_rate) we will use to process each time
+    -mid_window_size
+        The size of time(minutes, frames / frame_rate) we will use to pick the initial reference from the middle block
+    -mid_stride
+        We needn't use all of the frames of the middle window to compute reference, so we pick frames every mid_stride frames
+    -reference_chunk
+        The size of frames we will use to compute reference
 
-    
     [mask]
     Params:
     -thresFactor
@@ -101,7 +114,7 @@ def DefineParams(
         The pixel range of the mask region
         Only the pixels in the maskRange will be masked.
         Remark: This is the absolute value of the pixels, so it depends on the bit depth of the image's pixels. 
-        For example, if yo image range is [0, 255], then your reasonable maskRange should be at least a subset of [0, 255]. 
+        For example, if your image range is [0, 255], then your reasonable maskRange should be at least a subset of [0, 255]. 
         If you don't want to filter out any mask points, you can set this range to be very large.
     
     [pyramid]
@@ -113,44 +126,35 @@ def DefineParams(
     -r
         The radius of the patch
         The size of each patch is (2r+1)*(2r+1), and each patch has one control point.
-        A smaller r means more control points and more easier to capture noise
+        A smaller r means more control points and more easier to capture noise.
     -iter
-        The num of maximum iterations of each layer
+        The num of maximum iterations of each layer.
     -smoothPenalty
-        The coefficient of the smoothness penalty term
+        The coefficient of the smoothness penalty term.
         A larger smoothPenalty means more smooth motion we will get and correspondingly the error of intensity will increase
+    -tolerance
+        The tolerance to stop the iteration, default is 1e-3
 
-    [Reliable Analysis]
+    [processing]
     Params:
-    - n
-        The number of temporal samples used in the first-stage temporal smoothing.
-        A larger value offers more robust estimation but may oversmooth fast-changing signals.
-    - n2
-        The number of temporal samples used in the second, stronger temporal aggregation.
-        Typically greater than n, producing a more stable reference for cumulative mask generation.
-    - n3
-        The number of samples or the effective range for spatial neighborhood evaluation.
-        Controls the spatial robustness of the spatial mask by aggregating statistics over a wider window.
-    - sigma
-        Standard deviation of the Gaussian kernel for the first-pass spatial smoothing.
-        Determines the strength of spatial denoising during spatial mask template creation.
-    - sigma2
-        Standard deviation of the second, stronger Gaussian smoothing operation.
-        Used for temporal and accumulative mask estimation to enhance long-term structural stability.
-    - decay
-        Exponential decay factor governing how historical temporal evidence influences the cumulative mask.
-        Values close to 1 emphasize long-term statistics; smaller values focus on recent frames.
-    - temporalMaskThres
-        Threshold for generating the temporal mask.
-        Voxels with temporal stability metrics below this value are marked as unreliable.
-    - spatialMaskThres
-        Threshold for generating the spatial mask.
-        A higher threshold produces a more conservative spatial mask; a lower threshold retains more voxels.
+    -batch_size
+        The number of frames we will process each time. If the memory of your GPU is not enough, you can try to reduce this value.
+        The default value is 100
+
+    [ReliableAnalysis]
+    Params:
+    -win_size : int(pixels)
+        SSIM window size for 2D (odd number like 11, 21). 
+    -use_3d : bool
+        If True, compute a true 3D SSIM approximation using Gaussian smoothing.
+        If False, compute 2D SSIM slice-by-slice for 3D volumes (recommended for microscopy).
+    -sigma_3d : float or tuple
+        Gaussian sigma used in 3D SSIM approximation mode.
     '''
     ## read the metadata
     print("Reading meta data")
     if inputFile is None:
-        raise ValueError("inputFile must not be None. A valid file path is required.")
+        raise ValueError("[ERROR]inputFile must not be None. A valid file path is required.")
     
     elif inputFile is not None:
         meta=IO.readMeta_new(inputFile,Ifprint=verbose)
@@ -177,7 +181,19 @@ def DefineParams(
     config['MetaData']['zRatio']=zRatio
     config['MetaData']['SIZE']=data_shape
     config['MetaData']['frames']=nframes
-    config['MetaData']['Dim']=len(data_shape)
+    # Calculate single frame dimension
+    if len(data_shape) == 5:
+        # 5D data: (T, Z, C, Y, X), check Z dimension (index 1)
+        z_dim = data_shape[1]
+        if z_dim > 1:
+            # 3D single frame: (Z, Y, X)
+            single_frame_dim = 3
+        else:
+            # 2D single frame: (Y, X), Z=1 is just padding
+            single_frame_dim = 2
+    else:
+        raise ValueError("data_shape should be 5D (T, Z, C, Y, X)")
+    config['MetaData']['Dim'] = single_frame_dim
     config['MetaData']['voxelsize']=resolutionxyz
     config['MetaData']['fps']=framerate
     config['MetaData']['spacing_x']=spacing_x
@@ -187,24 +203,31 @@ def DefineParams(
     #change the downsample config
     config['downsample']['downsampleXY']=downsampleXY
     config['downsample']['downsampleZ']=downsampleZ
-    config['downsample']['downsampleT']=downsampleT
+     
     
     #change the filepath
     config['file_path']['input_path']=inputFile
     config['file_path']['registrated_path']=outputFile
-    config['file_path']['mask_path']=maskFile
+    config['file_path']['mask_path']=outputFile+'/mask'
+
     #change the dual_channels config
     config['channels']['dual_channel']=dual_channel
     config['channels']['function']=function
     config['channels']['k']=k
 
     #change the reference config
-    config['reference']['chunk_size']=chunk_size
-    config['reference']['mid_chunk_size']=mid_chunk_size
     config['reference']['pick_reference_auto']=False
+    config['reference']['mid_window_size']=mid_window_size
+    config['reference']['window_size']=window_size
+    config['reference']['mid_stride']=mid_stride
+    config['reference']['reference_chunk']=referece_chunk
+
 
     #change the preprocess config
-    config['preprocess']['normailize_to_0_255']=preprocess
+    config['preprocess']['normalize_to_0_255']=preprocess
+
+    #change the processing config
+    config['processing']['batch_size']=batch_size
 
     #change the mask config
     config['mask']['thresFactor']=thresFactor
@@ -215,25 +238,28 @@ def DefineParams(
     config['pyramid']['r']=r
     config['pyramid']['iter']=iter
     config['pyramid']['smoothPenalty']=smoothPenalty
+    config['pyramid']['tolerance']=tolerance
 
-    #change the Reliable analysis config
-    config['Reliable_Analysis']['n']=n
-    config['Reliable_Analysis']['n2']=n2
-    config['Reliable_Analysis']['n3']=n3
-    config['Reliable_Analysis']['sigma']=sigma
-    config['Reliable_Analysis']['sigma2']=sigma2
-    config['Reliable_Analysis']['decay']=decay
-    config['Reliable_Analysis']['temporalMaskThres']=temporalMaskThres
-    config['Reliable_Analysis']['spatialMaskThres']=-spatialMaskThres
+    #change the ReliableAnalysis config
+    config['ReliableAnalysis']['win_size']=win_size
+    config['ReliableAnalysis']['use_3d']=use_3d
+    config['ReliableAnalysis']['sigma_3d']=sigma_3d
 
-    # change the pyramid config
+    # change the save config
     config['save_config']['save_ref'] = save_ref
     config['save_config']['save_motion'] = save_motion
 
-    print("Config created =====> Saving the config")
+    print("[INFO]Config created =====> Saving the config")
+    # Create directory if it doesn't exist
+    config_dir = os.path.dirname(os.path.abspath(configFile))
+    if config_dir and not os.path.exists(config_dir):
+        os.makedirs(config_dir, exist_ok=True)
+        if verbose:
+            print(f"[INFO]Created directory: {config_dir}")
+    
     with open(configFile, "w") as f:
         toml.dump(config, f)
-    print("Config saved =====> Done")
+    print("[INFO]Config saved =====> Done")
     if verbose == True:
         print("\nConfiguration summary:")
         print("--------------------------------------------------")
@@ -244,7 +270,7 @@ def DefineParams(
         print(f"  frames: {config['MetaData']['frames']}")
         print(f"  Dim:    {config['MetaData']['Dim']}")
         print(f"  voxelsize: {config['MetaData']['voxelsize']}")
-        print(f"  frame rate: {config['MetaData']['frame_rate']} fps")
+        print(f"  frame rate: {config['MetaData']['fps']} fps")
  
         print("\n[Downsample]")
         print(f"  XY: {config['downsample']['downsampleXY']}")
@@ -252,7 +278,7 @@ def DefineParams(
             print("  Z : All the z slices")
         else:
             print(f"  Z : {config['downsample']['downsampleZ']}")
-        print(f"  T : {config['downsample']['downsampleT']}")
+
 
         print("\n[File Path]")
         print(f"  input_path :  {config['file_path']['input_path']}")
@@ -263,11 +289,14 @@ def DefineParams(
         print(f"  function     : {config['channels']['function']}")
         print(f"  k            : {config['channels']['k']}")
 
-        print("\n[Reference]")
-        print(f"  chunk_size          : {config['reference']['chunk_size']}")
+        print("\n[Processing]")
+        print(f"  batch_size        : {config['processing']['batch_size']} frames per batch")
 
+        print("\n[Reference]")
+        print(f"  mid_window_size         : {config['reference']['mid_window_size']} minutes {int(config['reference']['mid_window_size']*60*config['MetaData']['fps'])} frames")
+        print(f"  window_size             : {config['reference']['window_size']} minutes {int(config['reference']['window_size']*60*config['MetaData']['fps'])} frames")
         print("\n[Preprocess]")
-        print(f"  normailize_to_0_255 : {config['preprocess']['normailize_to_0_255']}")
+        print(f"  normalize_to_0_255 : {config['preprocess']['normalize_to_0_255']}")
 
         print("\n[Mask]")
         print(f"  thresFactor : {config['mask']['thresFactor']}")
@@ -278,280 +307,58 @@ def DefineParams(
         print(f"  r             : {config['pyramid']['r']}")
         print(f"  iter          : {config['pyramid']['iter']}")
         print(f"  smoothPenalty : {config['pyramid']['smoothPenalty']}")
+        print(f"  tolerance     : {config['pyramid']['tolerance']}")
 
-        print("\n[Reliable Analysis]")
-        print(f"  n            : {config['Reliable Analysis']['n']}")
-        print(f"  n2           : {config['Reliable Analysis']['n2']}")
-        print(f"  n3           : {config['Reliable Analysis']['n3']}")
-        print(f"  sigma        : {config['Reliable Analysis']['sigma']}")
-        print(f"  sigma2       : {config['Reliable Analysis']['sigma2']}")
-        print(f"  decay        : {config['Reliable Analysis']['decay']}")
-        print(f"  temporalMaskThres : {config['Reliable Analysis']['temporalMaskThres']}")
-        print(f"  spatialMaskThres : {config['Reliable Analysis']['spatialMaskThres']}")
+        print("\n[ReliableAnalysis]")
+        print(f"  win_size     : {config['ReliableAnalysis']['win_size']} pixels")
+        print(f"  use_3d       : {config['ReliableAnalysis']['use_3d']}")
+        print(f"  sigma_3d     : {config['ReliableAnalysis']['sigma_3d']}")
 
         print("--------------------------------------------------")
-        print("Configuration loaded successfully.\n")
+        print("[INFO]Configuration loaded successfully.\n")
 
-
-def Registration(configPath='./configs/config.toml'):
-    config=toml.load(configPath)
-    
-    ##################################################################################################################################
-    ## create the output File(zarr)
-    print("Creating the zarr file...")
-    outputfilePath=config['file_path']['registrated_path']
-    movingFilePath=config['file_path']['input_path']
-    # We need to know the shape of data first (X,Y,Z,T)
-    Dim=config['MetaData']['Dim']
-    downsampleXY=config['downsample']['downsampleXY']
-    downsampleZ=config['downsample']['downsampleZ']
-    downsampleT=config['downsample']['downsampleT']
-    total_frames=config['MetaData']['frames']
-
-    X=config['MetaData']['SIZE'][0]/downsampleXY
-    Y=config['MetaData']['SIZE'][1]/downsampleXY
-    
-
-    if Dim==3:
-        if downsampleZ ==-1:
-            Z=config['MetaData']['SIZE'][2]
-            downsampleZ=list(range(Z))
-        else:
-            Z=len(downsampleZ)
-
-    #create the dataset
-    root=zarr.open(outputfilePath,mode='w')
-    if Dim==3:
-        mem_z=root.create_dataset(
-            'membrane',shape=(total_frames,Z,X,Y),
-            chunk=(1,Z,X,Y),dtype="f4",compressor=None
-        )
-        cal_z=root.create_dataset(
-            'calcium',shape=(total_frames,Z,X,Y),
-            chunk=(1,Z,X,Y),dtype="f4",compressor=None
-        )
-        if config['save_config']['save_ref']:
-            ref_z=root.create_dataset(
-                'reference',shape=(total_frames,Z,X,Y),
-                chunk=(1,Z,X,Y),dtype="f4",compressor=None
-            )
-        if config['save_config']['save_motion']:
-            motion_z=root.create_dataset(
-                'motion',shape=(total_frames,Z,X,Y,3),
-                chunk=(1,Z,X,Y,3),dtype="f4",compressor=None
-            )
-    elif Dim==2:
-        mem_z=root.create_dataset(
-            'membrane',shape=(total_frames,X,Y),
-            chunk=(1,X,Y),dtype="f4",compressor=None
-        )
-        cal_z=root.create_dataset(
-            'calcium',shape=(total_frames,X,Y),
-            chunk=(1,X,Y),dtype="f4",compressor=None
-        )
-        if config['save_config']['save_ref']:
-            ref_z=root.create_dataset(
-                'reference',shape=(total_frames,X,Y),
-                chunk=(1,X,Y),dtype="f4",compressor=None
-            )
-        if config['save_config']['save_motion']:
-            motion_z=root.create_dataset(
-                'motion',shape=(total_frames,X,Y,3),
-                chunk=(1,X,Y,3),dtype="f4",compressor=None
-            )
-    ##################################################################################################################################
-    ## save the metadata
-    root.attrs['Metadata']={
-        'zRatio':config['MetaData']['zRatio'],
-        'SIZE':config['MetaData']['SIZE'],
-        'frames':config['MetaData']['frames'],
-        'Dim':config['MetaData']['Dim'],
-        'frames_rate':config['MetaData']['frame_rate'],
-        'voxelsize':config['MetaData']['voxelsize'],
-        'datatype':'f4'
-    }
-    ##################################################################################################################################
-    ### Do registration
-    print("Beginning to registrate all the frames...")
-    save_motion=config["save_config"]["save_motion"]
-    save_ref=config["save_config"]["save_ref"]
-
-    ## 1.process the downsample data
-    # ===================================== Step 1: process the middle block =====================================
-    # basic defination
-    base_transpose_axes = (0, 3, 2, 1) if Dim == 3 else (0, 2, 1)
-    motion_transpose_axes = base_transpose_axes + (4,)  
-    print(" Processing the middle chunk")
-    chunk_size=config['reference']['chunk_size']
-    mid_chunk_size=config['reference']['mid_chunk_size']
-    half_chunk = mid_chunk_size // 2
-    total_mid = total_frames // 2
-    mid_start = total_mid - half_chunk
-    mid_end   = mid_start + mid_chunk_size
-    frames_mid = list(range(mid_start, mid_end))
-
-    #read the data and compute the reference
-    mem_mid = IO.readFrame(movingFilePath, frames_mid, downsampleZ, channel=1,xy_down=downsampleXY)
-    ca_mid  = IO.readFrame(movingFilePath, frames_mid, downsampleZ, channel=0,xy_down=downsampleXY)
-    print("     Finish loading the data of the middle block")        
-    ref_img= reference.compute_reference_from_block(mem_mid,ca_mid,config)
-    print("     Finish picking the initial reference from the middle block")
-    
-    #registrate the frames
-    if Dim==3:
-        mem_mid, ca_mid, _, _, motion_mid = registration.wbi_registration_3d(
-            mem_mid, ca_mid, configPath, ref_img,frame=mid_start
-        )
-
-    elif  Dim==2:
-        mem_mid, ca_mid, _, _, motion_mid = registration.wbi_registration_2d(
-            mem_mid, ca_mid, configPath, ref_img,frame=mid_start
-        )
-        
-    #  save the result
-    batch_size = 10 # write 10 frames each time
-    for i in range(0, len(motion_mid), batch_size):
-        j = min(i + batch_size, len(motion_mid))
-        mem_batch=mem_mid[i:j].astype("f4")
-        cal_batch=ca_mid[i:j].astype("f4")
-        if save_motion:
-            motion_batch=motion_mid[i:j].astype("f4")
-        if save_ref:
-            ref_batch=np.repeat(ref_img[None, ...], j - i, axis=0).astype("f4")
-
-        mem_z[mid_start + i:mid_start + j] = mem_batch.transpose(base_transpose_axes)
-        cal_z[mid_start + i:mid_start + j] = cal_batch.transpose(base_transpose_axes)
-
-        if save_motion:
-            motion_z[mid_start + i:mid_start + j] = motion_batch.transpose(motion_transpose_axes)
-
-        if save_ref:
-            ref_z[mid_start + i:mid_start + j] = ref_batch.transpose(base_transpose_axes)
-
-    print("     Finish processing the middle block")
-
-    archors=[]
-    # ===================================== Step 2: process backward =====================================
-    base_transpose_axes_1frame = (2, 1, 0) if Dim == 3 else (1, 0)
-    motion_transpose_axes_1frame = base_transpose_axes + (3,)  
-    ref_windows_mem=np.array(mem_mid[0:chunk_size])
-    ref_windows_ca=np.array(ca_mid[0:chunk_size])
-    print(f" Processing Backward: frame {mid_start - downsampleT} to 0 (every {downsampleT} frames)")
-    for idx in range(mid_start - downsampleT, -1, -downsampleT):
-        archors.append(idx)
-        mem_ref_block = ref_windows_mem
-        ca_ref_block  = ref_windows_ca
-
-        #read the data
-        mem_img = IO.readFrame(movingFilePath, idx, downsampleZ,channel=1,xy_down=downsampleXY)
-        ca_img  = IO.readFrame(movingFilePath, idx, downsampleZ,channel=0,xy_down=downsampleXY)
-
-        #registrate this frames
-        mem_reg, ca_reg, ref_img,motion_reg = registration.register_one_frame(configPath, mem_img, ca_img,
-                                                    {"mem": mem_ref_block, "ca": ca_ref_block},verbose=True,idx=idx
-                                                    )
-        # save the result
-        mem_z[idx]=mem_reg.astype("f4").transpose(base_transpose_axes_1frame)
-        cal_z[idx]=ca_reg.astype("f4").transpose(base_transpose_axes_1frame)
-        if save_ref:
-            ref_z[idx] = ref_img.astype("f4").transpose(base_transpose_axes_1frame)
-        if save_motion:
-            motion_z[idx]=motion_reg.transpose(motion_transpose_axes_1frame)
-
-        #updata the window
-        mem_ref_block[1:chunk_size]=mem_ref_block[0:chunk_size-1]
-        mem_ref_block[0]=mem_reg
-        ca_ref_block[1:chunk_size]=ca_ref_block[0:chunk_size-1]
-        ca_ref_block[0]=ca_reg
-
-    # ===================================== Step 3: process forward =====================================
-    ref_windows_mem=np.array(mem_mid[-chunk_size:])
-    ref_windows_ca=np.array(ca_mid[-chunk_size:])
-    print(f" Processing Backward: frame {mid_end} to {total_frames} (every {downsampleT} frames)")
-    for idx in range(mid_end, total_frames, downsampleT):
-        archors.append(idx)
-        mem_ref_block = ref_windows_mem
-        ca_ref_block  = ref_windows_ca
-
-        mem_img = IO.readFrame(movingFilePath, idx, downsampleZ,channel=1,xy_down=downsampleXY)
-        ca_img  = IO.readFrame(movingFilePath, idx, downsampleZ,channel=0,xy_down=downsampleXY)
-
-        mem_reg, ca_reg, ref_img,motion_reg = registration.register_one_frame(configPath, mem_img, ca_img,
-                                                    {"mem": mem_ref_block, "ca": ca_ref_block},verbose=True,idx=idx
-                                                    )
-        mem_z[idx]=mem_reg.astype("f4").transpose(base_transpose_axes_1frame)
-        cal_z[idx]=ca_reg.astype("f4").transpose(base_transpose_axes_1frame)
-        if save_ref:
-            ref_z[idx] = ref_img.astype("f4").transpose(base_transpose_axes_1frame)
-        if save_motion:
-            motion_z[idx]=motion_reg.transpose(motion_transpose_axes_1frame)
-
-        #updata the window
-        mem_ref_block[0:chunk_size-1]=mem_ref_block[1:chunk_size]
-        mem_ref_block[-1]=mem_reg
-        ca_ref_block[0:chunk_size-1]=ca_ref_block[1:chunk_size]
-        ca_ref_block[-1]=ca_reg
-        #motion[z_idx] = motion_reg.astype("f4")
-    
-    ## 2.process the whole data
-    if downsampleT!=1:
-        for a in archors:
-            start_idx=max(0,a - downsampleT//2 + 1)
-            end_idx=min(total_frames, a + downsampleT//2)
-            print(f" Processing the frames {start_idx} to {end_idx} with archor frame {a}")
-            #read the reference data
-            if Dim==3:
-                ref_mem=mem_z[a].transpose((2,1,0))
-                ref_ca=cal_z[a].transpose((2,1,0))
-            elif Dim==2:
-                ref_mem=mem_z[a].transpose((1,0))
-                ref_ca=cal_z[a].transpose((1,0))
-            if config['channels']['dual_channel']:
-                ref_img=ref_mem+registration.transform(ref_ca,config['channels']['k'],config['channels']['function'])
-            else:
-                ref_img=ref_mem
-            frames_processing=list(range(start_idx,end_idx))
-
-            mem_img = IO.readFrame(movingFilePath, frames_processing, downsampleZ,channel=1,xy_down=downsampleXY)
-            ca_img  = IO.readFrame(movingFilePath, frames_processing, downsampleZ,channel=0,xy_down=downsampleXY)
-
-            if Dim==3:
-                mem_reg, ca_reg, _, _, motion_mid = registration.wbi_registration_3d(
-                    mem_img, ca_img, configPath, ref_img,frame=start_idx
-                )
-
-            elif  Dim==2:
-                mem_reg, ca_reg, _, _, motion_mid = registration.wbi_registration_2d(
-                    mem_img, ca_img, configPath, ref_img,frame=start_idx
-                )
-            #save the result
-            mem_z[start_idx:end_idx] = mem_reg.transpose(base_transpose_axes)
-            cal_z[start_idx:end_idx] = ca_reg.transpose(base_transpose_axes)
-
-            if save_motion:
-                motion_z[start_idx:end_idx] = motion_mid.transpose(motion_transpose_axes)
-            if save_ref:
-                ref_z[start_idx:end_idx] = np.repeat(ref_img[None, ...], end_idx - start_idx, axis=0).astype("f4").transpose(base_transpose_axes)
-    ##################################################################################################################################
-def Registration_v2(configPath='./configs/config.toml',
-                    parallel=False):
+####################################################################################################################
+##  main process
+def Registration_v3(configPath='./configs/config.toml', parallel=True):
     """
-    Full registration pipeline that writes outputs as OME-TIFF per-volume per-channel
-    (no zarr). Naming convention: vol_chN_XXXXXX.tif (6-digit frame index).
-    Motion is saved as per-frame HDF5 under 'motion/'.
+    Full 2D/3D registration pipeline for multi-channel volumetric time-lapse data.
+    
+    Parameters
+    ----------
+    configPath : str, default='./configs/config.toml'
+        Path to the configuration TOML file generated by `DefineParams`.
+    parallel : bool, default=True
+        Whether to run forward/backward registration in parallel using multiprocessing.
+        If True, uses GPU 0 and GPU 1 (if available) for backward and forward processing.
+    
+    Returns
+    -------
+    None
+        The function writes outputs to disk:
+        - Registered volumes per channel as OME-TIFF
+          Naming: vol_chN_XXXXXX.tif (6-digit frame index)
+        - Reference images (if save_ref=True)
+        - Motion fields (if save_motion=True) as HDF5
+    
+    Notes
+    -----
+    Pipeline Steps:
+    1. Load configuration and metadata from configPath.
+    2. Determine dataset dimensions and downsampling factors.
+    3. Compute initial reference image from middle block.
+    4. Register middle block frames in batches.
+    5. Maintain reference windows for forward/backward processing.
+    6. Process frames forward and backward from middle chunk (serial or parallel).
+    7. Save registered volumes, reference images, and motion fields.
 
-    Assumptions:
-      - IO.readND2Frame, registration.*, reference.compute_reference_from_block,
-        saveTiff_new are available in the import scope.
-      - saveTiff_new(image, save_path, config_path=None, metadata=None, verbose=True)
-        expects image shape TZCYX (5D).
+    Example
+    -------
+    Registration_v3(configPath='./configs/config.toml', parallel=True)
     """
-    import os
-    import toml
-    import numpy as np
-    import h5py
+
+    # For CUDA compatibility, use 'spawn' or 'forkserver'
+    mp.set_start_method('spawn', force=True)
     # user-provided save function (assumed imported already)
-    # from your_module import saveTiff_new
     # load config
     config = toml.load(configPath)
 
@@ -559,26 +366,24 @@ def Registration_v2(configPath='./configs/config.toml',
     output_root = config['file_path']['registrated_path']
     movingFilePath = config['file_path']['input_path']
 
+    # get basic meta info
     Dim = config['MetaData']['Dim']
     total_frames = int(config['MetaData']['frames'])
-    SIZE = config['MetaData']['SIZE']
 
+    # downsample params and the frames we need to process
     downsampleXY = config['downsample']['downsampleXY']
     downsampleZ = config['downsample']['downsampleZ']
-    downsampleT = config['downsample']['downsampleT']
+    window_size = config['reference']['window_size']
+    window_size_frames = int(window_size*60* config['MetaData']['fps'])  # convert minutes to frames
 
+    # Process downsampleZ: if -1, use all Z slices
     if Dim == 3:
         if downsampleZ == -1:
+            SIZE = config['MetaData']['SIZE']
             Z_full = int(SIZE[1])
             downsampleZ = list(range(Z_full))
-            Z = Z_full
-        else:
-            Z = len(downsampleZ)
-    else:
-        Z = 1  # 2D treated as Z=1 for TIFF saving
-    # print(downsampleZ)
     # prepare output directories (one folder per channel)
-    print("Preparing output directories...")
+    print("[INFO]Preparing output directories...")
     out_mem = os.path.join(output_root, "membrane")
     out_ca  = os.path.join(output_root, "calcium")
     out_ref = os.path.join(output_root, "reference")
@@ -595,385 +400,544 @@ def Registration_v2(configPath='./configs/config.toml',
     if save_motion:
         os.makedirs(out_mot, exist_ok=True)
 
-    # mapping for file naming: use the channel indices you read with IO.readND2Frame
-    # In your original code you used channel=1 for membrane and channel=0 for calcium.
-    # We'll use those indices in filenames: membrane -> ch1, calcium -> ch0
-    channel_index_map = {'membrane': 1, 'calcium': 0}
-
-    # helper: write one volume (Z,Y,X) or (Y,X) image to OME-TIFF using saveTiff_new
-
-        # print(f"Saved {fname} (shape {img5d.shape})")
+    # Channel index mapping for file naming
+    # Using channel indices as they appear in the ND2 file
+    # membrane channel = 1 in ND2 file, calcium channel = 0 in ND2 file
+    channel_index_map = {'membrane': 'ch1', 'calcium': 'ch0'}
 
     # ---------------------------
-    # Step A: process the middle chunk (same as your original code)
+    # Step A: Process the middle chunk to build initial reference
     # ---------------------------
-    print("Processing middle chunk to build initial reference...")
-    chunk_size = int(config['reference']['chunk_size'])
-    mid_chunk_size = int(config['reference']['mid_chunk_size'])
-    half_chunk = mid_chunk_size // 2
-    total_mid = total_frames // 2
-    mid_start = total_mid - half_chunk
-    mid_end   = mid_start + mid_chunk_size
-    frames_mid = list(range(mid_start, mid_end))
+    print("[INFO]Processing middle chunk to build initial reference...")
+    batch_size=config['processing']['batch_size'] # Frames per reference update and process frames to save memory
+    mid_window_size = int(config['reference']['mid_window_size'])  # Window size for initial reference in minutes
+    mid_window_size_frames = int(mid_window_size * 60 * config['MetaData']['fps'])  # Convert to frames
+    
+    # Calculate the middle window position
+    half_chunk = mid_window_size_frames // 2
+    total_mid = total_frames // 2  # Middle frame of entire dataset
+    mid_start = total_mid - half_chunk  # Start frame of middle window
+    mid_end = mid_start + mid_window_size_frames  # End frame of middle window
+    
 
-    # read middle block from nd2
-    mem_mid = IO.readND2Frame(movingFilePath, frames_mid, downsampleZ, channel=1, xy_down=downsampleXY, verbose=False)
-    ca_mid  = IO.readND2Frame(movingFilePath, frames_mid, downsampleZ, channel=0, xy_down=downsampleXY, verbose=False)
-    print(f"Loaded middle block frames {frames_mid[0]} to {frames_mid[-1]}.")
-    mem_mid=np.squeeze(mem_mid)
-    ca_mid =np.squeeze(ca_mid )
-    # compute reference from block
-    ref_img = reference.compute_reference_from_block(mem_mid, ca_mid, config)
-    print("Computed initial reference image.")
+    # Read middle block from ND2 file
+    # Channel 1 = membrane, channel 0 = calcium
+    mid_stride = int(config['reference']['mid_stride'])
+    frames_mid = list(range(mid_start, mid_end+1))  # List of frames in middle window
 
-    # registration on middle block
-    if Dim == 3:
-        mem_mid_reg, ca_mid_reg, _, _, motion_mid = registration.wbi_registration_3d(
-            mem_mid, ca_mid, configPath, ref_img, frame=mid_start
+    # load all of the frames to the memory is so memory-comsuming, so we downsample the frames
+    mem_mid_downsample = IO.readND2Frame(movingFilePath, list(range(mid_start, mid_end, mid_stride)), downsampleZ, channel=1, xy_down=downsampleXY, verbose=False)
+    ca_mid_downsample = IO.readND2Frame(movingFilePath, list(range(mid_start, mid_end, mid_stride)), downsampleZ, channel=0, xy_down=downsampleXY, verbose=False)
+    print(f"[INFO]Loaded middle block frames {frames_mid[0]} to {frames_mid[-1]} ({mid_window_size} minutes)")
+    
+    # Remove singleton dimensions
+    mem_mid_downsample = np.squeeze(mem_mid_downsample)
+    ca_mid_downsample = np.squeeze(ca_mid_downsample)
+    
+    # Compute initial reference image from middle block
+    ref_img = reference.compute_reference_from_block(mem_mid_downsample, ca_mid_downsample, config)
+    IO.write_volume_as_ome_tiff(
+        ref_img, out_ref, 'ref',f"{mid_start:06d}_{mid_end:06d}", configPath
+    )
+    print(f"[INFO]Computed initial reference image from middle block frames {frames_mid[0]} to {frames_mid[-1]} ({mid_window_size} minutes) picked every {mid_stride} frames")
+
+    # Register the middle block using either 2D or 3D registration based on dataset dimension
+    print(f"[INFO]Registering middle block...(every {batch_size} frames as a batch)")
+    
+
+    #storage the head and tail of the middle block, we will use them when we process forward and backward
+    from collections import deque
+
+    reference_chunk = config['reference']['reference_chunk']
+
+    head_mem = deque(maxlen=reference_chunk)
+    head_ca  = deque(maxlen=reference_chunk)
+    tail_mem = deque(maxlen=reference_chunk)
+    tail_ca  = deque(maxlen=reference_chunk)
+    num_frames = len(frames_mid)
+
+    for i in range(0, num_frames, batch_size):
+        batch_frames = frames_mid[i:i + batch_size]
+        mem_batch = IO.readND2Frame(
+            movingFilePath, batch_frames, downsampleZ,
+            channel=1, xy_down=downsampleXY, verbose=False
         )
-    else:
-        mem_mid_reg, ca_mid_reg, _, _, motion_mid = registration.wbi_registration_2d(
-            mem_mid, ca_mid, configPath, ref_img, frame=mid_start
+        ca_batch = IO.readND2Frame(
+            movingFilePath, batch_frames, downsampleZ,
+            channel=0, xy_down=downsampleXY, verbose=False
         )
 
-    # save middle block results (iterate through frames_mid)
-    print("Saving middle block results to OME-TIFF...")
-    for k, frame_id in enumerate(frames_mid):
-        # membrane
-        mem_frame = mem_mid_reg[k]  # shape (Z,Y,X) or (Y,X)
-        IO.write_volume_as_ome_tiff(mem_frame, out_mem, channel_index_map['membrane'], frame_id,configPath)
+        mem_batch = np.squeeze(mem_batch)
+        ca_batch  = np.squeeze(ca_batch)
 
-        # calcium
-        ca_frame = ca_mid_reg[k]
-        IO.write_volume_as_ome_tiff(ca_frame, out_ca, channel_index_map['calcium'], frame_id,configPath)
-        # reference (optional): ref_img is single 3D or 2D volume; save same ref for each frame in middle block
-
-
-        # motion (optional)
-        if save_motion:
-            mot_frame = motion_mid[k]  # shape (Z,Y,X,3) or (Y,X,3)
-            mot_fname = os.path.join(out_mot, f"motion_{frame_id:06d}.h5")
-            with h5py.File(mot_fname, 'w') as hf:
-                hf.create_dataset('motion', data=mot_frame, compression='gzip')
-            print(f"Saved {mot_fname} (motion field)")
-    if save_ref:
         if Dim == 3:
-            ref_frame = ref_img.copy()
+            mem_reg, ca_reg, _, _, motion = registration.wbi_registration_3d(
+                mem_batch, ca_batch, configPath, ref_img, frame=batch_frames[0]
+            )
         else:
-            ref_frame = ref_img.copy()
-        IO.write_volume_as_ome_tiff(ref_frame, out_ref, 'ref', f'{mid_start}~{mid_end}',configPath)  # filename will be vol_chref_xxx
-    n_gpu = 0
+            mem_reg, ca_reg, _, _, motion = registration.wbi_registration_2d(
+                mem_batch, ca_batch, configPath, ref_img, frame=batch_frames[0]
+            )
 
+        # save immediately
+        for k, fid in enumerate(batch_frames):
+            IO.write_volume_as_ome_tiff(
+                mem_reg[k], out_mem, channel_index_map['membrane'], fid, configPath
+            )
+            IO.write_volume_as_ome_tiff(
+                ca_reg[k], out_ca, channel_index_map['calcium'], fid, configPath
+            )
+
+            if save_motion:
+                with h5py.File(
+                    os.path.join(out_mot, f"motion_{fid:06d}.h5"), 'w'
+                ) as hf:
+                    hf.create_dataset('motion', data=motion[k], compression='gzip')
+
+
+    # ---------- maintain reference windows ----------
+        if i == 0:
+            for k in range(len(mem_reg)):
+                if len(head_mem) < reference_chunk:
+                    head_mem.append(mem_reg[k])
+                    head_ca.append(ca_reg[k])
+
+        for k in range(len(mem_reg)):
+            tail_mem.append(mem_reg[k])
+            tail_ca.append(ca_reg[k])
+
+        del mem_batch, ca_batch, mem_reg, ca_reg, motion
+
+    # ---------------------------
+    # Step B & C: Process forward and backward from the middle chunk
+    # ---------------------------
+
+    ## Detect GPU availability using CuPy
     try:
         import cupy as cp
         try:
-            n_gpu = cp.cuda.runtime.getDeviceCount()
-            print(f"Detected {n_gpu} GPU(s).")
+            num_gpus = cp.cuda.runtime.getDeviceCount()  # Get number of available GPUs
+            print(f"[INFO]Detected {num_gpus} GPU(s).")
         except Exception as e:
-            print("Failed to query GPU devices via CuPy.")
-            print("Falling back to serial mode.")
-            n_gpu = 0
-
+            print("[ERROR]Failed to query GPU devices via CuPy.")
+            print("[INFO]Falling back to serial mode.")
     except ImportError:
-        print("CuPy is not installed or failed to import.")
-        print("Falling back to serial mode.")
-        n_gpu = 0
-
-    if parallel == False or n_gpu<=1:
-        # ---------------------------
-        # Step B: process backward (from mid_start - 1 down to 0)
-        # ---------------------------
+        print("[ERROR]CuPy is not installed or failed to import.")
+        print("[INFO]Falling back to serial mode.")
+    
+    print(f"[INFO]Processing forward and backward every {window_size} minutes ({window_size_frames} frames)")
+    
+    # =========================
+    # Process in serial or parallel mode
+    # =========================
+    if not parallel:
+        # Serial processing: process backward direction first, then forward direction
+        print("[INFO]Running in serial mode...")
         
-        print(f"Processing backward: frames {mid_start - 1} to 0 with chunk size {downsampleT} ...")
-        archors = []
-        # initialize rolling window for reference windows (first chunk_size frames from mem_mid/ca_mid)
-        ref_windows_mem = np.array(mem_mid_reg[0:chunk_size])
-        ref_windows_ca  = np.array(ca_mid_reg[0:chunk_size])
+        # Process backward from middle chunk to beginning (frames mid_start to 0)
+        process_directional_chunks(
+            direction='backward',  # Process frames in reverse order
+            start_frame=mid_start,  # Starting from the beginning of the middle chunk
+            end_frame=0,  # Ending at the first frame of the dataset
+            init_mem_windows=head_mem,  # Initial membrane reference windows
+            init_ca_windows=head_ca,  # Initial calcium reference windows
+            device_id=None,  # Use CPU (no GPU)
+            configPath=configPath,  # Path to configuration file
+            config=config,  # Configuration dictionary
+            movingFilePath=movingFilePath,  # Path to input ND2 file
+            out_mem=out_mem,  # Output directory for membrane channel
+            out_ca=out_ca,  # Output directory for calcium channel
+            out_ref=out_ref,  # Output directory for reference images
+            out_mot=out_mot,  # Output directory for motion fields
+            channel_index_map=channel_index_map,  # Mapping of channel names to indices
+            save_motion=save_motion,  # Whether to save motion fields
+            save_ref=save_ref,  # Whether to save reference images
+            Dim=Dim,  # Dimensionality (2D or 3D)
+            window_size_frames=window_size_frames,  # Window size in frames
+            downsampleZ=downsampleZ,  # Z downsampling parameters
+            downsampleXY=downsampleXY,  # XY downsampling factor
+            batch_size=batch_size,  # Batch size for processing
+            reference_chunk=reference_chunk  # Reference chunk size
+        )
 
-        ref_img = reference.compute_reference_from_block( ref_windows_mem, ref_windows_ca, config)
+        # Process forward from middle chunk to end (frames mid_end+1 to total_frames)
+        process_directional_chunks(
+            direction='forward',  # Process frames in normal order
+            start_frame=mid_end+1,  # Starting from the end of the middle chunk
+            end_frame=total_frames,  # Ending at the last frame of the dataset
+            init_mem_windows=tail_mem,  # Initial membrane reference windows
+            init_ca_windows=tail_ca,  # Initial calcium reference windows
+            device_id=None,  # Use CPU (no GPU)
+            configPath=configPath,
+            config=config,
+            movingFilePath=movingFilePath,
+            out_mem=out_mem,
+            out_ca=out_ca,
+            out_ref=out_ref,
+            out_mot=out_mot,
+            channel_index_map=channel_index_map,
+            save_motion=save_motion,
+            save_ref=save_ref,
+            Dim=Dim,
+            window_size_frames=window_size_frames,
+            downsampleZ=downsampleZ,
+            downsampleXY=downsampleXY,
+            batch_size=batch_size,  # Batch size for processing
+            reference_chunk=reference_chunk  # Reference chunk size
+        )
+
+    else:
+        # Parallel processing: process both directions simultaneously
+        print("[INFO]Running in parallel mode...")
         
-        # iterate backwards in downsampleT steps
-        for idx in range(mid_start , -1, -downsampleT):
-            end_idx=idx
-            start_idx= max(0, end_idx-downsampleT)
-            print(f" Processing from frame {start_idx} to frame {end_idx} with reference picked from {end_idx+1} to {end_idx+1+chunk_size}")
-            frames_backward=list(range(start_idx,end_idx))
-            mem_img = IO.readND2Frame(movingFilePath, frames_backward, downsampleZ, channel=1, xy_down=downsampleXY, verbose=False)
-            ca_img  = IO.readND2Frame(movingFilePath, frames_backward, downsampleZ, channel=0, xy_down=downsampleXY, verbose=False)
-            mem_img=np.squeeze(mem_img)
-            ca_img =np.squeeze(ca_img)
+        # Create process for backward direction processing
+        p_bwd = mp.Process(
+            target=process_directional_chunks,
+            kwargs=dict(
+                direction='backward',
+                start_frame=mid_start,
+                end_frame=0,
+                init_mem_windows=head_mem,
+                init_ca_windows=head_ca,
+                device_id=0,  # Use GPU 0 for backward processing
+                configPath=configPath,
+                config=config,
+                movingFilePath=movingFilePath,
+                out_mem=out_mem,
+                out_ca=out_ca,
+                out_ref=out_ref,
+                out_mot=out_mot,
+                channel_index_map=channel_index_map,
+                save_motion=save_motion,
+                save_ref=save_ref,
+                Dim=Dim,
+                window_size_frames=window_size_frames,
+                downsampleZ=downsampleZ,
+                downsampleXY=downsampleXY,
+                batch_size=batch_size,  # Batch size for processing
+                reference_chunk=reference_chunk  # Reference chunk size
+            )
+        )
 
-            # pick reference
-            ref_img=reference.compute_reference_from_block(ref_windows_mem,ref_windows_ca,config)
+        # Create process for forward direction processing
+        p_fwd = mp.Process(
+            target=process_directional_chunks,
+            kwargs=dict(
+                direction='forward',
+                start_frame=mid_end+1,
+                end_frame=total_frames,
+                init_mem_windows=tail_mem,
+                init_ca_windows=tail_ca,
+                device_id=1,  # Use GPU 1 for forward processing
+                configPath=configPath,
+                config=config,
+                movingFilePath=movingFilePath,
+                out_mem=out_mem,
+                out_ca=out_ca,
+                out_ref=out_ref,
+                out_mot=out_mot,
+                channel_index_map=channel_index_map,
+                save_motion=save_motion,
+                save_ref=save_ref,
+                Dim=Dim,
+                window_size_frames=window_size_frames,
+                downsampleZ=downsampleZ,
+                downsampleXY=downsampleXY,
+                batch_size=batch_size,  # Batch size for processing
+                reference_chunk=reference_chunk  # Reference chunk size
+            )
+        )
 
-            if Dim == 3:
-                mem_backward_reg, ca_backward_reg, _, _, motion_mid = registration.wbi_registration_3d(
-                    mem_img, ca_img, configPath, ref_img, frame=start_idx
-                )
-            else:
-                mem_backward_reg, ca_backward_reg, _, _, motion_mid = registration.wbi_registration_2d(
-                    mem_img, ca_img, configPath, ref_img, frame=start_idx
-                )
-            for k, frame_id in enumerate(frames_backward):
-                # membrane
-                mem_frame = mem_backward_reg[k]  # shape (Z,Y,X) or (Y,X)
-                IO.write_volume_as_ome_tiff(mem_frame, out_mem, channel_index_map['membrane'], frame_id,configPath)
-                # calcium
-                ca_frame = ca_backward_reg[k]
-                IO.write_volume_as_ome_tiff(ca_frame, out_ca, channel_index_map['calcium'], frame_id,configPath)
-                # reference (optional): ref_img is single 3D or 2D volume; save same ref for each frame in middle block
+        p_bwd.start()
+        p_fwd.start()
+        p_bwd.join()
+        p_fwd.join()
 
-                # motion (optional)
-                if save_motion:
-                    mot_frame = motion_mid[k]  # shape (Z,Y,X,3) or (Y,X,3)
-                    mot_fname = os.path.join(out_mot, f"motion_{frame_id:06d}.h5")
-                    with h5py.File(mot_fname, 'w') as hf:
-                        hf.create_dataset('motion', data=mot_frame, compression='gzip')
-                    print(f"Saved {mot_fname} (motion field)")
-            # save reference
-            if save_ref:
-                if Dim == 3:
-                    ref_frame = ref_img.copy()
-                else:
-                    ref_frame = ref_img.copy()
-                IO.write_volume_as_ome_tiff(ref_frame, out_ref, 'ref', f'{start_idx}~{end_idx}',configPath)  # filename will be vol_chref_xxx
-
-            # update rolling window
-            ref_windows_mem=np.array(mem_backward_reg[0:chunk_size])
-            ref_windows_ca = np.array(ca_backward_reg[0:chunk_size])
-
-        # ---------------------------
-        # Step C: process forward (from mid_end + 1 down to total_frames)
-        # ---------------------------
-        print(f"Processing forward: frames {mid_end+1} to {total_frames-1} with chunk size {downsampleT} ...")
-
-        # initialize rolling window from end of middle block
-        ref_windows_mem = np.array(mem_mid_reg[-chunk_size:])
-        ref_windows_ca  = np.array(ca_mid_reg[-chunk_size:])
-
-        # iterate forward in steps of downsampleT
-        for idx in range(mid_end, total_frames, downsampleT):
-            end_idx = min(idx + downsampleT - 1, total_frames - 1)
-            start_idx = idx
-            print(f" Processing from frame {start_idx} to frame {end_idx} with reference picked from {idx - chunk_size} to {idx}")
-
-            # pick frame indices for this forward chunk
-            frames_forward = list(range(start_idx, min(start_idx + downsampleT, total_frames)))
-            
-            # read moving images
-            mem_img = IO.readND2Frame(movingFilePath, frames_forward, downsampleZ, channel=1, xy_down=downsampleXY, verbose=False)
-            ca_img  = IO.readND2Frame(movingFilePath, frames_forward, downsampleZ, channel=0, xy_down=downsampleXY, verbose=False)
-            mem_img = np.squeeze(mem_img)
-            ca_img  = np.squeeze(ca_img)
-
-            # compute reference from current rolling window
-            ref_img = reference.compute_reference_from_block(ref_windows_mem, ref_windows_ca, config)
-
-            # registration
-            if Dim == 3:
-                mem_forward_reg, ca_forward_reg, _, _, motion_forward = registration.wbi_registration_3d(
-                    mem_img, ca_img, configPath, ref_img, frame=start_idx
-                )
-            else:
-                mem_forward_reg, ca_forward_reg, _, _, motion_forward = registration.wbi_registration_2d(
-                    mem_img, ca_img, configPath, ref_img, frame=start_idx
-                )
-
-            # save results
-            for k, frame_id in enumerate(frames_forward):
-                # membrane
-                IO.write_volume_as_ome_tiff(mem_forward_reg[k], out_mem, channel_index_map['membrane'], frame_id, configPath)
-                # calcium
-                IO.write_volume_as_ome_tiff(ca_forward_reg[k], out_ca, channel_index_map['calcium'], frame_id, configPath)
-                # motion
-                if save_motion:
-                    mot_fname = os.path.join(out_mot, f"motion_{frame_id:06d}.h5")
-                    with h5py.File(mot_fname, 'w') as hf:
-                        hf.create_dataset('motion', data=motion_forward[k], compression='gzip')
-                    print(f"Saved {mot_fname} (motion field)")
-
-            # save reference
-            if save_ref:
-                if Dim == 3:
-                    ref_frame = ref_img.copy()
-                else:
-                    ref_frame = ref_img.copy()
-                IO.write_volume_as_ome_tiff(ref_frame, out_ref, 'ref', f'{start_idx}~{end_idx}',configPath)  # filename will be vol_chref_xxx
-
-            # update rolling window
-            ref_windows_mem=np.array(mem_forward_reg[-chunk_size:])
-            ref_windows_ca = np.array(ca_forward_reg[-chunk_size:])
-
-def create_downsample_dataset(
-    configPath='./configs/config.toml',
-    downsampleFilePath='./registrated_downsample.zarr',
-    ds_XY=4,
-    ds_T=2
+def ReliableAnalysis(
+    configPath: str = None,
 ):
+    """
+    Main entry function for computing spatial, temporal, and accumulative reliability masks.
 
+    Loads configuration, defines correlation function, and calls ComputMask
+    to compute reliability masks.
+
+    Directory structure under `registrated_path` must be:
+        root_dir/
+            ├── membrane/      # Registered membrane images (channel 1) (e.g. vol_ch1_000000.tif)
+            ├── calcium/       # Registered calcium images (channel 0) (e.g. vol_ch0_000000.tif)
+            └── reference/     # Reference images used for registration (e.g. vol_ch0_000000.tif)
+
+    And after running this function, we will add a folder named 'mask' under root_dir
+
+    Parameters
+    ----------
+    configPath : str
+        Path to TOML configuration file.
+
+    Returns
+    -------
+    None
+
+    Notes
+    -----
+    - For dual-channel data, calcium channel is transformed using config['channels']['function'] 
+      and weighted by config['channels']['k'] before correlation.
+    - ComputMask handles the main mask computation, including SSIM comparison with references.
+    """
+    # Validate input parameters
+    if configPath is None:
+        raise ValueError("configPath must be provided")
+    
+    # Load configuration parameters
     config = toml.load(configPath)
+    
+    # Define directory paths
+    root_dir = config['file_path']['registrated_path']
+    out_dir = config['file_path']['mask_path']
+    
+    # Create subdirectory paths using os.path.join for platform compatibility
+    mem_dir = os.path.join(root_dir, "membrane")    # Channel 1 in registration process
+    ca_dir = os.path.join(root_dir, "calcium")      # Channel 0 in registration process
+    ref_dir = os.path.join(root_dir, "reference")
+    
+    # Count total number of frames from membrane channel directory
+    frames = sorted(os.listdir(mem_dir))
+    T = len(frames)
+    
+    # Define correlation function based on channel configuration
+    def compute_cor_fn(mem, ca):
+        """
+        Computes correlation map from membrane and calcium channels.
+        
+        Parameters:
+        -----------
+        mem : np.ndarray
+            Membrane channel frame (shape: Z, Y, X)
+        ca : np.ndarray
+            Calcium channel frame (shape: Z, Y, X)
+            
+        Returns:
+        --------
+        cor : np.ndarray
+            Correlation map (shape: Z, Y, X)
+        """
+        if config['channels']['dual_channel']:
+            # For dual-channel data, transform calcium and combine with membrane
+            k = config['channels']['k']                # Weight factor for calcium channel
+            function = config['channels']['function']  # Transformation function
+            ca_transformed = registration.transform(ca, k, function)
+            cor = mem + ca_transformed
+        else:
+            # For single-channel data, use only membrane channel
+            cor = mem
+        return cor
+    
+    # Import ComputMask function from utils.reliableAnalysis module
+    from utils.reliableAnalysis import ComputMask
+    
+    # Call ComputMask to perform actual mask computation
+    ComputMask(
+        mem_dir=mem_dir,
+        ca_dir=ca_dir,
+        ref_dir=ref_dir,
+        out_dir=out_dir,
+        config=config['ReliableAnalysis'],
+        compute_cor_fn=compute_cor_fn,
+        configPath=configPath,
+        T=T,
+    )
 
-    raw_path = config['file_path']['input_path']             
-    reg_path = config['file_path']['registrated_path']       
+####################################################################################################################
+##  create downsample dataset
+def create_downsample_dataset_v3(
+    configPath='./configs/config.toml',
+    downsampleFilePath='./registrated_downsample',
+    ds_XY=1,
+    ds_T=1,
+    block_size=50,
+    verbose=True
+):
+    """
+    Create a downsampled dataset (v3) from registered and raw ND2 data.
 
-    Dim = config['MetaData']['Dim']
+    This version:
+    - Uses lazy dask arrays for TIFF series to reduce peak memory usage
+    - Computes per block to avoid loading all frames at once
+    - Outputs membrane, calcium, and mask volumes
+    - Maintains XY and time downsampling
+
+    Parameters
+    ----------
+    configPath : str
+        Path to TOML configuration file (must contain input_path, registrated_path, mask_path, and metadata).
+    downsampleFilePath : str
+        Output directory for downsampled dataset.
+    ds_XY : int
+        XY downsampling factor applied on top of base downsample in config.
+    ds_T : int
+        Temporal downsampling factor (frames skipped along time axis).
+    block_size : int
+        Number of frames to process per block to reduce memory consumption.
+    verbose : bool
+        Whether to print progress information.
+
+    Outputs
+    -------
+    downsampleFilePath/
+        membrane/    : raw_membrane + registered_membrane + reference
+        calcium/     : raw_calcium + registered_calcium
+        mask/        : reference + registered_membrane + mask
+
+    Usage
+    -----
+    create_downsample_dataset_v3(
+        configPath='./configs/config.toml',
+        downsampleFilePath='./registrated_downsample',
+        ds_XY=4, ds_T=2, block_size=50, verbose=True
+    )
+    """
+    import shutil
+    # ---------------- load config ----------------
+    config = toml.load(configPath)
+    raw_path  = config['file_path']['input_path']
+    reg_path  = config['file_path']['registrated_path']
+    mask_path = config['file_path']['mask_path']
     total_frames = config['MetaData']['frames']
 
     base_dsXY = config['downsample']['downsampleXY']
-    base_dsT  = config['downsample']['downsampleT']
+    base_dsZ  = config['downsample']['downsampleZ']
+    if base_dsZ == -1:
+        base_dsZ = list(range(config['MetaData']['SIZE'][2]))
 
-    raw_dsXY = base_dsXY * ds_XY     
-    reg_dsXY = ds_XY               
-    raw_dsT  = base_dsT * ds_T
-    reg_dsT  = ds_T
+    raw_dsXY = base_dsXY * ds_XY
 
-    raw_z = zarr.open(raw_path, mode='r')
-    reg_z = zarr.open(reg_path, mode='r')
-
-    has_ref    = 'reference' in reg_z
-    has_motion = 'motion' in reg_z
-
+    # ---------------- output dirs ----------------
     if os.path.exists(downsampleFilePath):
-        os.system(f"rm -rf {downsampleFilePath}")
-    root_out = zarr.open(downsampleFilePath, mode='w')
+        if verbose:
+            print(f"[INFO] Removing existing directory: {downsampleFilePath}")
+        shutil.rmtree(downsampleFilePath)
 
-    compressor = Blosc(cname="zstd", clevel=3, shuffle=1)
+    mem_out_dir  = os.path.join(downsampleFilePath, "membrane")
+    cal_out_dir  = os.path.join(downsampleFilePath, "calcium")
+    mask_out_dir = os.path.join(downsampleFilePath, "mask")
+    os.makedirs(mem_out_dir, exist_ok=True)
+    os.makedirs(cal_out_dir, exist_ok=True)
+    os.makedirs(mask_out_dir, exist_ok=True)
 
-    
-    if Dim == 3:
-        _, Z_raw, X_raw, Y_raw = raw_z['membrane'].shape
-    else:
-        _, X_raw, Y_raw = raw_z['membrane'].shape
-        Z_raw = None
+    # ---------------- time indices ----------------
+    time_index = np.arange(0, total_frames, ds_T)
+    T_ds = len(time_index)
+    if verbose:
+        print(f"[INFO] Total frames after T-downsample: {T_ds}")
 
-    def compute_resize_shape(orig_shape, k, is3d):
-        if k == 1:
-            return orig_shape
-        if is3d:
-            # orig = (Z, X, Y), want (Z, X//k, Y//k)
-            Z, X, Y = orig_shape
-            return (Z, X // k, Y // k)
-        else:
-            X, Y = orig_shape
-            return (X // k, Y // k)
+    # ---------------- build reference index ----------------
+    from utils.reliableAnalysis import build_reference_index
+    reg_mem_path = os.path.join(reg_path, "membrane")
+    reg_cal_path = os.path.join(reg_path, "calcium")
+    reg_ref_path = os.path.join(reg_path, "reference")
+    ref_map, _ = build_reference_index(reg_ref_path)
 
-    if Dim == 3:
-        raw_spatial_ds = compute_resize_shape((Z_raw, X_raw, Y_raw), raw_dsXY, is3d=True)
-        reg_spatial_ds = compute_resize_shape((Z_raw, X_raw, Y_raw), reg_dsXY, is3d=True)
-        assert raw_spatial_ds == reg_spatial_ds
-        Z_ds, X_ds, Y_ds = raw_spatial_ds
-    else:
-        raw_spatial_ds = compute_resize_shape((X_raw, Y_raw), raw_dsXY, is3d=False)
-        reg_spatial_ds = compute_resize_shape((X_raw, Y_raw), reg_dsXY, is3d=False)
-        assert raw_spatial_ds == reg_spatial_ds
-        X_ds, Y_ds = raw_spatial_ds
+    # ---------------- build lazy dask arrays ----------------
+    if verbose:
+        print("[INFO] Building lazy downsampled dask arrays...")
+    reg_mem_ds = IO.downsample_tiff_series(
+        [os.path.join(reg_mem_path, f"vol_ch1_{i:06d}.tif") for i in time_index],
+        xy_down=ds_XY, batch_processing=False, verbose=verbose
+    )
+    reg_cal_ds = IO.downsample_tiff_series(
+        [os.path.join(reg_cal_path, f"vol_ch0_{i:06d}.tif") for i in time_index],
+        xy_down=ds_XY, batch_processing=False, verbose=verbose
+    )
+    reg_ref_ds = IO.downsample_tiff_series(
+        [ref_map[i] for i in time_index],
+        xy_down=ds_XY, batch_processing=False, verbose=verbose
+    )
+    mask_ds = IO.downsample_tiff_series(
+        [os.path.join(mask_path, f"vol_mask_{i:06d}.tif") for i in time_index],
+        xy_down=ds_XY, batch_processing=False, verbose=verbose
+    )
 
-    T_raw_ds = total_frames // raw_dsT
-    T_reg_ds = total_frames // reg_dsT
-    assert T_raw_ds == T_reg_ds
-    T_ds = T_raw_ds
+    # ---------------- block-wise compute & write ----------------
+    num_blocks = (T_ds + block_size - 1) // block_size
+    for b in range(num_blocks):
+        start = b * block_size
+        end   = min((b + 1) * block_size, T_ds)
+        if verbose:
+            print(f"[INFO] Processing block {b+1}/{num_blocks} frames [{start}:{end}]")
 
-    raw_index = np.arange(0, total_frames, raw_dsT)
-    reg_index = np.arange(0, total_frames, reg_dsT)
-    raw_index = raw_index[:T_ds]
-    reg_index = reg_index[:T_ds]
+        # ---- compute this block only ----
+        reg_mem_block = reg_mem_ds[start:end].compute()
+        reg_cal_block = reg_cal_ds[start:end].compute()
+        reg_ref_block = reg_ref_ds[start:end].compute()
+        mask_block    = mask_ds[start:end].compute()
 
-    if Dim == 3:
-        out_shape = (T_ds, Z_ds, X_ds, Y_ds * 2)
-        out_chunk = (1, Z_ds, X_ds, Y_ds * 2)
-    else:
-        out_shape = (T_ds, X_ds, Y_ds * 2)
-        out_chunk = (1, X_ds, Y_ds * 2)
+        # Keep single channel only if necessary
+        if reg_mem_block.ndim == 4:
+            reg_mem_block = reg_mem_block[..., 0]
+        if reg_cal_block.ndim == 4:
+            reg_cal_block = reg_cal_block[..., 0]
+        if reg_ref_block.ndim == 4:
+            reg_ref_block = reg_ref_block[..., 0]
+        if mask_block.ndim == 4:
+            mask_block = mask_block[..., 0]
 
-    mem_out = root_out.create_dataset('membrane', shape=out_shape, chunk=out_chunk, dtype='f4', compressor=compressor)
-    cal_out = root_out.create_dataset('calcium', shape=out_shape, chunk=out_chunk, dtype='f4', compressor=compressor)
+        # ---- raw ND2 ----
+        raw_frames = time_index[start:end]
+        try:
+            raw_mem = IO.readND2Frame(
+                raw_path, frames=raw_frames, slices=base_dsZ,
+                channel=1, xy_down=raw_dsXY, verbose=False
+            )
+            raw_mem = np.squeeze(raw_mem, axis=0) if raw_mem.shape[0] == 1 else raw_mem
 
-    if has_ref:
-        ref_out = root_out.create_dataset('reference', shape=out_shape, chunk=out_chunk, dtype='f4', compressor=compressor)
+            raw_cal = IO.readND2Frame(
+                raw_path, frames=raw_frames, slices=base_dsZ,
+                channel=0, xy_down=raw_dsXY, verbose=False
+            )
+            raw_cal = np.squeeze(raw_cal, axis=0) if raw_cal.shape[0] == 1 else raw_cal
+        except Exception as e:
+            print(f"[ERROR] Failed to read raw ND2 frames {raw_frames}: {e}")
+            continue
 
-    if has_motion:
-        if Dim == 3:
-            out_shape_m = (T_ds, Z_ds, X_ds, Y_ds * 2, 3)
-            out_chunk_m = (1, Z_ds, X_ds, Y_ds * 2, 3)
-        else:
-            out_shape_m = (T_ds, X_ds, Y_ds * 2, 3)
-            out_chunk_m = (1, X_ds, Y_ds * 2, 3)
-        motion_out = root_out.create_dataset('motion', shape=out_shape_m, chunk=out_chunk_m, dtype='f4', compressor=compressor)
+        # ---- write files ----
+        for i, t in enumerate(raw_frames):
+            try:
+                IO.write_multichannel_volume_as_ome_tiff(
+                    volume=[raw_mem[i].squeeze(), reg_mem_block[i].squeeze(), reg_ref_block[i].squeeze()],
+                    out_dir=mem_out_dir,
+                    frame_idx=t,
+                    configPath=configPath,
+                    label='membrane_downsample'
+                )
+                IO.write_multichannel_volume_as_ome_tiff(
+                    volume=[raw_cal[i].squeeze(), reg_cal_block[i].squeeze()],
+                    out_dir=cal_out_dir,
+                    frame_idx=t,
+                    configPath=configPath,
+                    label='calcium_downsample'
+                )
+                IO.write_multichannel_volume_as_ome_tiff(
+                    volume=[reg_ref_block[i].squeeze(), reg_mem_block[i].squeeze(), mask_block[i].squeeze()],
+                    out_dir=mask_out_dir,
+                    frame_idx=t,
+                    configPath=configPath,
+                    label='mask_downsample'
+                )
+            except Exception as e:
+                print(f"[ERROR] Failed to write frame {t}: {e}")
 
+        if verbose:
+            print(f"[INFO] Block {b+1}/{num_blocks} finished. Shapes: "
+                  f"mem={reg_mem_block.shape}, cal={reg_cal_block.shape}, ref={reg_ref_block.shape}, mask={mask_block.shape}")
 
-    def resize_xy(data, ds_factor, is3d):
-        if ds_factor == 1:
-            return data.astype(np.float32)
+    if verbose:
+        print("[ALL DONE] Downsampled dataset (v3) created successfully.")
 
-        if is3d:
-            # data: (Z, X, Y)
-            Z, X, Y = data.shape
-            newZ = Z
-            newX = X // ds_factor
-            newY = Y // ds_factor
-            out = resize(
-                data,
-                (newZ, newX, newY),
-                order=1,
-                anti_aliasing=True,
-                preserve_range=True
-            ).astype(np.float32)
-            return out
-        else:
-            # data: (X, Y)
-            X, Y = data.shape
-            newX = X // ds_factor
-            newY = Y // ds_factor
-            out = resize(
-                data,
-                (newX, newY),
-                order=1,
-                anti_aliasing=True,
-                preserve_range=True
-            ).astype(np.float32)
-            return out
+####################################################################################################################
+####################################################################################################################
+## helper functions
 
-
-    def get_concat_frame(z_raw, z_reg, key, t_raw, t_reg):
-        raw_f = z_raw[key][t_raw]
-        reg_f = z_reg[key][t_reg]
-
-        is3d = (Dim == 3)
-
-        raw_f_ds = resize_xy(raw_f, raw_dsXY, is3d=is3d)
-        reg_f_ds = resize_xy(reg_f, reg_dsXY, is3d=is3d)
-
-        return np.concatenate([raw_f_ds, reg_f_ds], axis=-1)
-
-
-    for ti, (tr, tg) in enumerate(zip(raw_index, reg_index)):
-        mem_out[ti] = get_concat_frame(raw_z, reg_z, 'membrane', tr, tg)
-        cal_out[ti] = get_concat_frame(raw_z, reg_z, 'calcium', tr, tg)
-
-        if has_ref:
-            ref_out[ti] = get_concat_frame(raw_z, reg_z, 'reference', tr, tg)
-
-        if has_motion:
-            # motion: shape (..., 3)
-            raw_m = raw_z['motion'][tr]
-            reg_m = reg_z['motion'][tg]
-
-            if Dim == 3:
-                raw_m_ds = np.stack([resize_xy(raw_m[..., c], raw_dsXY, is3d=True) for c in range(3)], axis=-1)
-                reg_m_ds = np.stack([resize_xy(reg_m[..., c], reg_dsXY, is3d=True) for c in range(3)], axis=-1)
-            else:
-                raw_m_ds = np.stack([resize_xy(raw_m[..., c], raw_dsXY, is3d=False) for c in range(3)], axis=-1)
-                reg_m_ds = np.stack([resize_xy(reg_m[..., c], reg_dsXY, is3d=False) for c in range(3)], axis=-1)
-
-            motion_out[ti] = np.concatenate([raw_m_ds, reg_m_ds], axis=-2)
-
-    print(f"Done. Visualization zarr saved to: {downsampleFilePath}")
-def read_reg_tiff(folder, frame_idx, ch_idx):
-    fname = os.path.join(folder, f"vol_ch{ch_idx}_{frame_idx:06d}.tif")
-    if not os.path.exists(fname):
-        raise FileNotFoundError(f"Cannot find {fname}")
-    vol = tifffile.imread(fname)  # (Z,Y,X)
-    return vol
 def write_volume_as_ome_tiff(volume, out_dir, ch_idx, frame_idx,configPath, spacing_x=1.0, spacing_y=1.0):
     """
     volume: np.ndarray, shape (Z,Y,X) for 3D or (Y,X) for 2D
@@ -999,219 +963,206 @@ def write_volume_as_ome_tiff(volume, out_dir, ch_idx, frame_idx,configPath, spac
     metadata = {'spacing_x': spacing_x, 'spacing_y': spacing_y, 'data_shape': img5d.shape}
     # call the provided save function
     IO.saveTiff_new(img5d, fname, config_path=configPath, metadata=metadata, verbose=False)
-def create_downsample_dataset_v2(
-    configPath='./configs/config.toml',
-    downsampleFilePath='./registrated_downsample',
-    ds_XY=4,
-    ds_T=2,
-    block_size=50
-):
-    config = toml.load(configPath)
 
-    raw_path = config['file_path']['input_path']          
-    reg_path = config['file_path']['registrated_path']    
-    Dim = config['MetaData']['Dim']
-    total_frames = config['MetaData']['frames']
+def build_chunks(start_frame, end_frame, window_size, direction):
+    """
+    Returns a list of frame-index lists.
+    Applies the rule:
+      - residual chunk < 0.5 * window_size is merged to neighbor
+    """
 
-    base_dsXY = config['downsample']['downsampleXY']
-    base_dsT  = config['downsample']['downsampleT']
-    base_dsZ  = config['downsample']['downsampleZ']
+    assert direction in ('forward', 'backward')
 
-    if base_dsZ == -1:
-        base_dsZ = list(range(config['MetaData']['SIZE'][2]))
+    if direction == 'forward':
+        frames = list(range(start_frame, end_frame))
     else:
-        base_dsZ = base_dsZ
+        frames = list(range(start_frame - 1, end_frame - 1, -1))
 
-    raw_dsXY = base_dsXY * ds_XY
-    reg_dsXY = ds_XY
+    chunks = []
+    i = 0
+    N = len(frames)
 
+    while i < N:
+        chunk = frames[i:i + window_size]
+        chunks.append(chunk)
+        i += window_size
 
-    if os.path.exists(downsampleFilePath):
-        os.system(f"rm -rf {downsampleFilePath}")
+    # ---- handle residual chunk ----
+    if len(chunks) >= 2:
+        last_chunk = chunks[-1]
+        if len(last_chunk) < window_size // 2:
+            # merge into previous
+            chunks[-2].extend(last_chunk)
+            chunks.pop(-1)
 
-    mem_out_dir = os.path.join(downsampleFilePath, "membrane")
-    cal_out_dir = os.path.join(downsampleFilePath, "calcium")
-    os.makedirs(mem_out_dir)
-    os.makedirs(cal_out_dir)
+    return chunks
 
-    # Time point indices
-    raw_index = np.arange(0, total_frames, ds_T)
-    reg_index = np.arange(0, total_frames, ds_T)
-    T_ds = min(len(raw_index), len(reg_index))
-    raw_index = raw_index[:T_ds]
-    reg_index = reg_index[:T_ds]
-
-    # ------------ Get reg dimensions ------------
-    reg_mem_path = os.path.join(reg_path, "membrane")
-    reg_cal_path = os.path.join(reg_path, "calcium")
-
-    first_reg = IO.read_reg_tiff(reg_mem_path, reg_index[0], ch_idx=1)  # (Z,Y,X)
-    Z_raw, Y_raw, X_raw = first_reg.shape
-    Y_ds = Y_raw // ds_XY
-    X_ds = X_raw // ds_XY
-
-    print(f"[INFO] Downsampled shape: Z={Z_raw}, Y={Y_ds}, X={X_ds}")
-
-    #
-    num_blocks = (T_ds + block_size - 1) // block_size
-    print(f"[INFO] Total frames after T-downsample: {T_ds}")
-    print(f"[INFO] Block count: {num_blocks}")
-
-    for b in range(num_blocks):
-        print(f"Processing block {b+1}/{num_blocks}...")
-        start = b * block_size
-        end   = min((b+1)*block_size, T_ds)
-        size  = end - start
-
-        raw_frames = raw_index[start:end]
-
-        # raw_block_mem shape (T, Yd, Xd, Z) after transpose
-        raw_block_mem = IO.readND2Frame(
-            raw_path, frames=raw_frames, slices=base_dsZ,
-            channel=1, xy_down=raw_dsXY, verbose=False
-        )
-
-        raw_block_cal = IO.readND2Frame(
-            raw_path, frames=raw_frames, slices=base_dsZ,
-            channel=0, xy_down=raw_dsXY, verbose=False
-        )
-        raw_block_mem = np.squeeze(raw_block_mem)
-        raw_block_cal = np.squeeze(raw_block_cal)
-        ti_reg_list = reg_index[start:end]
-        Gm_block_list, Gc_block_list = [], []
-
-        for idx in ti_reg_list:
-            gm = IO.read_reg_tiff(reg_mem_path, idx, ch_idx=1)  # (Z,Y,X)
-            gc = IO.read_reg_tiff(reg_cal_path, idx, ch_idx=0)
-            Gm_block_list.append(gm)
-            Gc_block_list.append(gc)
-
-        Gm_block = np.array(Gm_block_list)  # (T,Z,Y,X)
-        Gc_block = np.array(Gc_block_list)
-
-
-
-        Gm_block_ds = IO.downsample(np.expand_dims(Gm_block, axis=2), xy_down=ds_XY)[:, :, 0]
-        Gc_block_ds = IO.downsample(np.expand_dims(Gc_block, axis=2), xy_down=ds_XY)[:, :, 0]
-
-        # -------- concatenate raw + reg (Z,Y,X_raw + X_reg) --------
-
-        for i in range(size):
-            frame_id = reg_index[start + i]  
-            mem_list=[raw_block_mem[i],Gm_block_ds[i]]
-            ca_list=[raw_block_cal[i],Gc_block_ds[i]]
-
-            IO.write_multichannel_volume_as_ome_tiff(
-                volume=mem_list, out_dir=mem_out_dir,
-                frame_idx=frame_id,
-                configPath=configPath,
-                label='membrane_downsample'
-            )
-
-            IO.write_multichannel_volume_as_ome_tiff(
-                volume=mem_list, out_dir=cal_out_dir,
-                frame_idx=frame_id,
-                configPath=configPath,
-                label='calcium_downsample'
-            )
-
-        print(f"Block {b+1}/{num_blocks} finished.")
-
-    print("[ALL DONE] Downsampled dataset created successfully.")
-
-def ReliableAnalysis(
-    configPath: str = None,
-    ds_XY: int = 4,
-    ds_T: int = 2,
+def process_directional_chunks(
+    direction,
+    start_frame,
+    end_frame,
+    init_mem_windows,
+    init_ca_windows,
+    device_id,
+    configPath,
+    config,
+    movingFilePath,
+    out_mem,
+    out_ca,
+    out_ref,
+    out_mot,
+    channel_index_map,
+    save_motion,
+    save_ref,
+    Dim,
+    window_size_frames,
+    reference_chunk,
+    downsampleZ,
+    downsampleXY,
+    batch_size=50,
 ):
     """
-    Main entry function for computing spatial, temporal, and accumulative
-    reliability masks.
+    Process frames in chunks in a specified direction (forward or backward) with batch processing and 
+    sliding reference windows for registration.
 
-    Directory structure under `registrated_path` must be:
-        root_dir/
-            ├── membrane/
-            ├── calcium/
-            └── reference/
+    This function:
+    - Divides frames into chunks to reduce peak memory usage.
+    - Registers membrane and calcium channels to a computed reference image.
+    - Maintains a rolling reference window (deque) for computing the reference image.
+    - Supports both forward and backward processing directions.
+    - Saves registered images and optional motion fields.
 
-    The user must provide a correlation function:
-
-        def compute_cor_fn(membrane_frame, calcium_frame):
-            return dat_cor   # shape (Z, Y, X)
-
-    All output masks will be stored under the directory specified by
-    `mask_path` in the config file.
+    Parameters:
+    -----------
+    direction : str
+        'forward' or 'backward'
+    start_frame, end_frame : int
+        Frame range to process
+    init_mem_windows, init_ca_windows : list or np.ndarray
+        Initial reference windows
+    device_id : int or None
+        GPU device ID
+    configPath : str
+        Path to config
+    config : dict
+        Configuration dictionary
+    movingFilePath : str
+        Path to ND2 file
+    out_mem, out_ca, out_ref, out_mot : str
+        Output directories
+    channel_index_map : dict
+        {'membrane': idx, 'calcium': idx}
+    save_motion, save_ref : bool
+        Whether to save motion or reference images
+    Dim : int
+        2 or 3
+    window_size_frames : int
+        Chunk size
+    reference_chunk : int
+        Size of rolling reference window
+    downsampleZ, downsampleXY : int/float
+        Downsampling factors
+    batch_size : int
+        Number of frames per batch
     """
-    config= toml.load(configPath)
-    root_dir = config['file_path']['registrated_path']
-    out_dir  = config['file_path']['mask_path']
 
-    mem_dir = os.path.join(root_dir, "membrane")
-    ca_dir  = os.path.join(root_dir, "calcium")
-    ref_dir = os.path.join(root_dir, "reference")
+    import numpy as np
+    import h5py
+    import cupy as cp
+    import os
+    from collections import deque
 
+    if device_id is not None:
+        cp.cuda.Device(device_id).use()
 
-    # temporal_dir = os.path.join(out_dir, "temporal_Mask")
-    # accumula_dir = os.path.join(out_dir, "accumula_Mask")
-    # spatial_dir  = os.path.join(out_dir, "spatial_Mask")
-    # os.makedirs(spatial_dir, exist_ok=True)
-    # os.makedirs(accumula_dir, exist_ok=True)
-    # os.makedirs(temporal_dir, exist_ok=True)
-    frames = sorted(os.listdir(mem_dir))
-    T = len(frames)
+    # -------------------------------
+    # Initialize reference windows as deque
+    # -------------------------------
+    ref_windows_mem = deque(init_mem_windows, maxlen=reference_chunk)
+    ref_windows_ca  = deque(init_ca_windows, maxlen=reference_chunk)
 
-    def compute_cor_fn(mem,ca):
-        if config['channels']['dual_channel']:
-            k = config['channels']['k']
-            function = config['channels']['function']
-            ca_transformed = registration.transform(ca, k, function)
-            cor = mem + ca_transformed
-        else:
-            cor = mem
-        return cor
-    ComputMask(
-        mem_dir,
-        ca_dir,
-        ref_dir,
-        out_dir,
-        config['Reliable_Analysis'],
-        compute_cor_fn,
-        configPath,
-        T,
-        ds_XY,
-        ds_T
+    # Build frame chunks
+    chunks = build_chunks(
+        start_frame=start_frame,
+        end_frame=end_frame,
+        window_size=window_size_frames,
+        direction=direction
     )
 
-def ReferenceComparation(configPath: str = None) :
-    import re
-    config=toml.load(configPath)
-    ref_dir=config['file_path']['registrated_path']+'reference/'
-    frames = sorted(os.listdir(ref_dir))
-    prev_frame=None
-    for frame in frames:
-        if prev_frame is None:
-            prev_frame=tifffile.imread(ref_dir+frame)
-            prev_group=re.match(r"vol_chref_(\d+)_(\d+).tif",frame)
-            prev_start=int(prev_group.group(1))
-            prev_end=int(prev_group.group(2))
+    for frames in chunks:
+        frames = sorted(frames)
+        print(f"[{direction}] Processing chunk {frames[0]}~{frames[-1]} (n={len(frames)})")
 
-        else:
-            this_frame=tifffile.imread(ref_dir+frame)
-            this_group=re.match(r"vol_chref_(\d+)_(\d+).tif",frame)
-            this_start=int(this_group.group(1))
-            this_end=int(this_group.group(2))
-            difference_map=local_ssim_difference(prev_frame,this_frame)
-            
-            IO.write_volume_as_ome_tiff(difference_map,
-                                        os.path.join(config['file_path']['mask_path'],'Diff_in_reference'),
-                                        "Reference_diff",
-                                        f'{prev_start}~{prev_end}_vs_{this_start}~{this_end}',
-                                        configPath
-                                        )
-            prev_frame=this_frame
-            prev_start=this_start
-            prev_end=this_end
+        # -------------------------------
+        # Compute reference once per chunk
+        # -------------------------------
+        ref_img = reference.compute_reference_from_block(
+            list(ref_windows_mem), list(ref_windows_ca), config
+        )
 
+        #renew the windows:
+        ref_windows_mem=[]
+        ref_windows_ca=[]
+        
+        if save_ref:
+            IO.write_volume_as_ome_tiff(
+                ref_img.copy(), out_ref, 'ref',
+                f'{frames[0]}~{frames[-1]}', configPath
+            )
 
+        # -------------------------------
+        # Process in batches
+        # -------------------------------
+        num_frames = len(frames)
+        for i in range(0, num_frames, batch_size):
+            batch_frames = frames[i:i + batch_size]
+            print(f"    batch {batch_frames[0]}~{batch_frames[-1]} (n={len(batch_frames)})")
 
+            # Read frames
+            mem_batch = np.squeeze(IO.readND2Frame(
+                movingFilePath, batch_frames, downsampleZ,
+                channel=1, xy_down=downsampleXY, verbose=False
+            ))
+            ca_batch  = np.squeeze(IO.readND2Frame(
+                movingFilePath, batch_frames, downsampleZ,
+                channel=0, xy_down=downsampleXY, verbose=False
+            ))
 
+            # Registration
+            if Dim == 3:
+                mem_reg, ca_reg, _, _, motion = registration.wbi_registration_3d(
+                    mem_batch, ca_batch, configPath, ref_img, frame=batch_frames[0]
+                )
+            else:
+                mem_reg, ca_reg, _, _, motion = registration.wbi_registration_2d(
+                    mem_batch, ca_batch, configPath, ref_img, frame=batch_frames[0]
+                )
+
+            # Save batch results immediately
+            for k, fid in enumerate(batch_frames):
+                IO.write_volume_as_ome_tiff(
+                    mem_reg[k], out_mem, channel_index_map['membrane'], fid, configPath
+                )
+                IO.write_volume_as_ome_tiff(
+                    ca_reg[k], out_ca, channel_index_map['calcium'], fid, configPath
+                )
+                if save_motion:
+                    with h5py.File(os.path.join(out_mot, f"motion_{fid:06d}.h5"), 'w') as hf:
+                        hf.create_dataset('motion', data=motion[k], compression='gzip')
+
+                # -------------------------------
+                # Update rolling reference window
+                # -------------------------------
+                if direction == 'forward':
+                    ref_windows_mem.append(mem_reg[k])
+                    ref_windows_ca.append(ca_reg[k])
+                else:  # backward
+                    if len(ref_windows_mem) < reference_chunk:
+                        ref_windows_mem.append(mem_reg[k])
+                        ref_windows_ca.append(ca_reg[k])
+
+            # Free batch memory
+            del mem_batch, ca_batch, mem_reg, ca_reg, motion
+            cp.get_default_memory_pool().free_all_blocks()
+
+    print(f"[{direction}] Processing complete.")
