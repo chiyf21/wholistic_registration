@@ -12,27 +12,28 @@ spacing_z = 9.0
 
 [downsample]
 downsampleXY = 1
-downsampleT = 100
-downsampleZ = [ 5, 6, 7,]
+downsampleZ = [ 4, 5, 6,]
 
 [file_path]
-input_path = "/home/cyf/wbi/Virginia/f338/221124_f338_ubi_gCaMP7f_bactin_mCherry_CAAX_7dpf002.nd2"
-registrated_path = "./registrated_data/f338_1218registrated/"
-mask_path = "./registrated_data/f338_mask/"
+input_path = "/home/cyf/wbi/Virginia/raw_data/f338/221124_f338_ubi_gCaMP7f_bactin_mCherry_CAAX_7dpf002.nd2"
+registrated_path = "./registrated_data/f338/f338_registrated_0120"
+mask_path = "./registrated_data/f338/f338_registrated_0120/mask"
 
 [channels]
 dual_channel = true
-function = "log10"
-k = 0
+function = "raw"
+k = 0.0
 
 [reference]
 pick_reference_auto = false
 chunk_size = 50
-mid_chunk_size = 400
+mid_window_size = 15
+window_size = 15
+mid_stride = 10
+reference_chunk = 50
 
 [preprocess]
 normalize_to_0_255 = false
-normailize_to_0_255 = false
 
 [mask]
 thresFactor = 5
@@ -42,20 +43,16 @@ maskRange = [ 5, 4000,]
 layer = 3
 r = 5
 iter = 10
+tolerance = 0.001
 smoothPenalty = 0.08
 
-[Reliable_Analysis]
-n = 20
-n2 = 20
-n3 = 40
-sigma = 1
-sigma2 = 10.0
-decay = 0.99
-temporalMaskThres = 3
-spatialMaskThres = 0
-win_size=11
-use_3d=false
-sigma_3d=1.5
+[ReliableAnalysis]
+win_size = 15
+use_3d = false
+sigma_3d = 3
+
+[processing]
+batch_size = 100
 
 [save_config]
 save_ref = true

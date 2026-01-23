@@ -21,9 +21,6 @@ from . import calFlow3d_Wei_v1
 import toml
 from . import visualization
 from . import option
-#TODO
-#need to write a 3D version
-#2025/8/11  14:22
 
 def transform(image,k=1,method="raw"):
     if method=="raw":
@@ -107,10 +104,11 @@ def wbi_registration_2d(moving_membrane_image,moving_Ca_image,config_file,refere
     option['iter']=pyramid["iter"]
     option['movRange']=5.
     smoothPenalty_raw=pyramid["smoothPenalty"]
-
+    option['tol']=pyramid['tolerance']
     #get smoothPenalty
     Pnltfactor = prep.getSmPnltNormFctr(dat_ref, option)
     smoothPenalty=Pnltfactor*smoothPenalty_raw
+    option['smoothPenalty']=smoothPenalty
 
     #do registration
     for i in frames:
@@ -122,8 +120,6 @@ def wbi_registration_2d(moving_membrane_image,moving_Ca_image,config_file,refere
             Ca_1plane=moving_Ca_image[i,:,:]
             dat_ca=np.stack([Ca_1plane] * 3, axis=2)
         
-    
-    
         if channels["dual_channel"]:
             dat_ca_tran=transform(dat_ca,channels["k"],channels["function"])
             #normalize to the mean and std of the reference
@@ -138,7 +134,7 @@ def wbi_registration_2d(moving_membrane_image,moving_Ca_image,config_file,refere
         option['mask_mov'] = mask.bwareafilt3_wei(option['mask_mov'], maskRange)
 
         #get motion
-        motion_current, _ , new_coords,error_logs = calFlow3d_Wei_v1.getMotion(dat_mov, dat_ref, smoothPenalty, option)
+        motion_current, _ , new_coords,error_logs = calFlow3d_Wei_v1.getMotion(dat_mov, dat_ref, option)
         if channels["dual_channel"]:
             corrected_ca = calFlow3d_Wei_v1.correctMotion(dat_ca, motion_current)
         corrected_mem = calFlow3d_Wei_v1.correctMotion(dat_mem, motion_current)
@@ -231,11 +227,13 @@ def wbi_registration_3d(moving_membrane_image,moving_Ca_image,config_file,refere
     option['layer']=pyramid["layer"]
     option['iter']=pyramid["iter"]
     option['movRange']=5.
+    option['tol']=pyramid["tolerance"]
     smoothPenalty_raw=pyramid["smoothPenalty"]
 
     #get smoothPenalty
     Pnltfactor = prep.getSmPnltNormFctr(dat_ref, option)
     smoothPenalty=Pnltfactor*smoothPenalty_raw
+    option['smoothPenalty']=smoothPenalty
 
     for i in frames:
         #get dat_mov
@@ -258,7 +256,7 @@ def wbi_registration_3d(moving_membrane_image,moving_Ca_image,config_file,refere
         option['mask_mov'] = mask.bwareafilt3_wei(option['mask_mov'], maskRange)
 
         #get motion
-        motion_current, _ , new_coords,error_logs = calFlow3d_Wei_v1.getMotion(dat_mov, dat_ref, smoothPenalty, option)
+        motion_current, _ , new_coords,error_logs = calFlow3d_Wei_v1.getMotion(dat_mov, dat_ref,option)
         if channels["dual_channel"]:
             corrected_ca = calFlow3d_Wei_v1.correctMotion(dat_ca.transpose(2,1,0), motion_current)
         corrected_mem = calFlow3d_Wei_v1.correctMotion(dat_mem.transpose(2,1,0), motion_current)
@@ -268,9 +266,9 @@ def wbi_registration_3d(moving_membrane_image,moving_Ca_image,config_file,refere
         #print error
         if verbose==True:
             if frame is None:
-                print(f"        Frame: {i+1}\tInitial Error is:{initial_error}\tEventual Error: {eventual_error}")
+                print(f"        Frame: {i+1}\tInitial Error is:{initial_error:.4f}\tEventual Error: {eventual_error:.4f}")
             else:
-                print(f"        Frame: {frame}\tInitial Error is:{initial_error}\tEventual Error: {eventual_error}")
+                print(f"        Frame: {frame}\tInitial Error is:{initial_error:.4f}\tEventual Error: {eventual_error:.4f}")
                 frame=frame+1
         error=dict[
             "initial_error":initial_error,
