@@ -47,9 +47,9 @@ tolerance = 0.001
 smoothPenalty = 0.08
 
 [ReliableAnalysis]
-win_size = 15
+win_size = 11
 use_3d = false
-sigma_3d = 3
+sigma_3d = 1.5
 
 [processing]
 batch_size = 100
