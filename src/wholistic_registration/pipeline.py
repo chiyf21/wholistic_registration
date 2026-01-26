@@ -9,7 +9,7 @@ if __name__ == "__main__":
         configFile=configFile, 
         inputFile='/home/cyf/wbi/Virginia/raw_data/f338/221124_f338_ubi_gCaMP7f_bactin_mCherry_CAAX_7dpf002.nd2',
         outputFile='/home/cyf/wbi/Virginia/registrated_data/f338/f338_registrated_0120', 
-        downsampleXY=4,
+        downsampleXY=1,
         dual_channel=True,
         downsampleZ=[4,5,6], #choose which planes to use
         window_size=15, ##  minutes
@@ -38,7 +38,7 @@ if __name__ == "__main__":
     main_function.create_downsample_dataset_v3(
         configFile,
         downsampleFilePath='./registrated_data/f338/f338_registrated_0121_downsample/',
-        ds_XY=1,
+        ds_XY=4,
         ds_T=1,
         block_size=50
     )
