@@ -549,13 +549,16 @@ def getMotion(dat_mov, dat_ref, option, verbose=False):
 
             # Check convergence: stop if error increases for multiple iterations
             if iter == iterNum - 1:
-                print("Reached the maximum number of iterations")
+                if verbose:
+                    print("Reached the maximum number of iterations")
                 break
             elif cp.sum(oldError <= currentError) > 1:
-                print("Error increased for multiple iterations")
+                if verbose:
+                    print("Error increased for multiple iterations")
                 break
             elif np.abs(oldError[-1] - currentError) < option["tol"]:
-                print("Absolute difference between old and new error is less than 1e-3")
+                if verbose:
+                    print("Absolute difference between old and new error is less than 1e-3")
                 break
             else:
                 # Update error history (shift and add new error)
@@ -688,7 +691,8 @@ def getMotion(dat_mov, dat_ref, option, verbose=False):
                 )
 
             if max_diff_motion < 1e-3:
-                print("Max diff. old vs new motion is less than 1e-3")
+                if verbose:
+                    print("Max diff. old vs new motion is less than 1e-3")
                 break
 
 

@@ -1,22 +1,46 @@
 [MetaData]
+#Params:
+#   -zRatio
+#       The ratio between z and x/y spacing
+#   -SIZE
+#       The size of the data in [frames, z_slices, channels, height, width]
+#   -frames
+#       The total number of frames in the dataset
+#   -nchannels
+#       The number of channels in the dataset
+#   -Dim
+#       The dimension of a single frame: 3 for 3D (Z,Y,X), 2 for 2D (Y,X)
+#   -voxelsize
+#       The voxel size in [x, y, z] directions (in microns)
+#   -fps
+#       The frame rate (frames per second)
+#   -spacing_x
+#       The spacing in x direction (microns)
+#   -spacing_y
+#       The spacing in y direction (microns)
+#   -spacing_z
+#       The spacing in z direction (microns)
 zRatio=1
 SIZE=[256,256,13]
 frames=1
+nchannels=2
+Dim=3
+voxelsize=[0.325,0.325,9.0]
+fps=0.25
+spacing_x=0.325
+spacing_y=0.325
+spacing_z=9.0
 
 [downsample]
 #Params:
 #   -downsampleXY
 #       The coefficient of the downsampling on X or Y dimension.
 #       If downsampleX = 4 & origin shape of 1 slice is (X,Y), then after downsampleing the shape should be (X/4,Y/4)
-#   -downsampleT
-#       The coefficient of the downsampling on T dimension.
-#       If downsampleT = 10, we will pick frames like 1,11,21,31,etc
 #   -downsample Z
 #       An list of the z silces we will use.
 #       If downsampleZ=[4,5,6,7], we will use the 5th, 6th, 7th, 8th silces of the whole data.
 #       If downsampleZ=None, we will use all of the z slices 
 downsampleXY=1
-downsampleT=1
 downsampleZ=[0]
 
 
@@ -27,7 +51,9 @@ downsampleZ=[0]
 #   -output_path
 #       The filepath of the output file. The output file may be .zarr format    
 input_path=""
-output_path=""
+registrated_path=""
+mask_path=""
+
 
 [channels]
 #Params:
@@ -105,8 +131,28 @@ maskRange=[5,4000]
 layer=1
 r=5
 iter=10
+tolerance=0.001
 smoothPenalty=0.08
+
+[ReliableAnalysis]
+#Params:
+#   -win_size
+#       The size of time(minutes, frames / frame_rate) we will use to process each time
+#   -use_3d
+#       Whether to use 3D motion model
+#   -sigma_3d
+#       The standard deviation of the 3D motion model
+win_size=11
+use_3d=false
+sigma_3d=1.5
+
+
+[processing]
+#Params:
+#   -batch_size
+#       The size of how many frames we will process in one time, if this value is setted as a large number, it will occupy more memory but will run faster
+batch_size=50
 
 [save_config]
 save_ref=true
-save_motion=true
+save_motion=false
