@@ -104,7 +104,9 @@ def compute_reference_from_block(mem_block, ca_block,config):
         ca_block = cp.asarray(ca_block)
         Ca_ref = cp.mean(ca_block[indsort, :], axis=0)
         Ca_ref_transform =transform(Ca_ref,k,function)
-
-        return (mem_ref + Ca_ref_transform).get()
+        result = mem_ref + Ca_ref_transform
     else:
-        return mem_ref.get()
+        result = mem_ref
+    
+    # Return as NumPy array - use .get() for CuPy, or return directly for NumPy
+    return result.get() if hasattr(result, 'get') else result
