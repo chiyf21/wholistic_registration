@@ -269,7 +269,8 @@ def Yunfeng_edge_map(frame,r=1,sigma=4,outcoef=3,min_size=40):
     EX_square=calculate.imfilter(frame_smooth**2,average_kernel,boundary='replicate',output='same',functionality="corr")
     std=np.sqrt(EX_square-EX**2)
     Norm=(frame_smooth-EX)/std
-    edges_init=cp.where((Norm>outcoef)|(Norm < -outcoef), 1., 0.).get()
+    edges_result = cp.where((Norm>outcoef)|(Norm < -outcoef), 1., 0.)
+    edges_init = edges_result.get() if hasattr(edges_result, 'get') else edges_result
     # edges_smooth=ndi.gaussian_filter(edges_init, sigma=3, mode="nearest")>0.3
     labeled_img = label(edges_init, connectivity=2)
     regions = regionprops(labeled_img)

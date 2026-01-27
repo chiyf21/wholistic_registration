@@ -161,7 +161,14 @@ def wbi_registration_2d(moving_membrane_image,moving_Ca_image,config_file,refere
         motions.append(motion_current[:,:,0,:])
         
     
-    return cp.asarray(mem_channel).get(),cp.asarray(Ca_channel).get(),dat_ref,errors,cp.asarray(motions).get()
+    # Convert to NumPy arrays - use .get() for CuPy, or return directly for NumPy
+    mem_arr = cp.asarray(mem_channel)
+    ca_arr = cp.asarray(Ca_channel)
+    motion_arr = cp.asarray(motions)
+    mem_out = mem_arr.get() if hasattr(mem_arr, 'get') else mem_arr
+    ca_out = ca_arr.get() if hasattr(ca_arr, 'get') else ca_arr
+    motion_out = motion_arr.get() if hasattr(motion_arr, 'get') else motion_arr
+    return mem_out, ca_out, dat_ref, errors, motion_out
 
 def wbi_registration_3d(moving_membrane_image,moving_Ca_image,config_file,reference_image=None,motion_init=None,verbose=True,frame=None):
     '''Load the config file'''
@@ -282,7 +289,14 @@ def wbi_registration_3d(moving_membrane_image,moving_Ca_image,config_file,refere
             Ca_channel.append(corrected_ca.transpose(2,1,0))
         motions.append(motion_current.transpose(2,1,0,3))
 
-    return cp.asarray(mem_channel).get(),cp.asarray(Ca_channel).get(),dat_ref,errors,cp.asarray(motions).get()
+    # Convert to NumPy arrays - use .get() for CuPy, or return directly for NumPy
+    mem_arr = cp.asarray(mem_channel)
+    ca_arr = cp.asarray(Ca_channel)
+    motion_arr = cp.asarray(motions)
+    mem_out = mem_arr.get() if hasattr(mem_arr, 'get') else mem_arr
+    ca_out = ca_arr.get() if hasattr(ca_arr, 'get') else ca_arr
+    motion_out = motion_arr.get() if hasattr(motion_arr, 'get') else motion_arr
+    return mem_out, ca_out, dat_ref, errors, motion_out
 
 def register_one_frame(configFilePath, mem_img, ca_img, ref_pool,idx,verbose=True):
     """Register one mem+Ca frame to the reference generated from the pool"""
