@@ -97,9 +97,9 @@ def DefineParams(
         If true, it will pick the reference image from the moving video each several frames
         If false, you need to give a reference image
     -window_size
-        The size of time(minutes, frames / frame_rate) we will use to process each time
+        The size of time (minutes, frames / frame_rate) we will use to process each time
     -mid_window_size
-        The size of time(minutes, frames / frame_rate) we will use to pick the initial reference from the middle block
+        The size of time (minutes, frames / frame_rate) we will use to pick the initial reference from the middle block
     -mid_stride
         We needn't use all of the frames of the middle window to compute reference, so we pick frames every mid_stride frames
     -reference_chunk
@@ -167,6 +167,8 @@ def DefineParams(
         spacing_z=meta['spacing_z']
         framerate=meta['fps']
         zRatio=meta['zRatio']
+        data_dtype=meta['dtype']
+        bytes_per_pixel=meta['bytes_per_pixel']
 
     
     ## load the default config file
@@ -181,6 +183,8 @@ def DefineParams(
     config['MetaData']['zRatio']=zRatio
     config['MetaData']['SIZE']=data_shape
     config['MetaData']['frames']=nframes
+    config['MetaData']['dtype']=str(data_dtype)  # Store as string for TOML compatibility
+    config['MetaData']['bytes_per_pixel']=bytes_per_pixel
     # Calculate single frame dimension
     if len(data_shape) == 5:
         # 5D data: (T, Z, C, Y, X), check Z dimension (index 1)
@@ -313,6 +317,90 @@ def DefineParams(
         print(f"  win_size     : {config['ReliableAnalysis']['win_size']} pixels")
         print(f"  use_3d       : {config['ReliableAnalysis']['use_3d']}")
         print(f"  sigma_3d     : {config['ReliableAnalysis']['sigma_3d']}")
+
+        # ========== Resource Estimation Section ==========
+        print("\n[Resource Estimation]")
+        
+        # Get data dimensions
+        T, Z, C, Y, X = config['MetaData']['SIZE']
+        fps = config['MetaData']['fps']
+        bytes_per_pixel = config['MetaData']['bytes_per_pixel']
+        data_dtype = config['MetaData']['dtype']
+        
+        # Calculate downsampled dimensions
+        ds_xy = config['downsample']['downsampleXY']
+        ds_z = config['downsample']['downsampleZ']
+        if ds_z == -1:
+            Z_down = Z
+        else:
+            Z_down = len(ds_z) if isinstance(ds_z, list) else Z
+        
+        Y_down = Y // ds_xy
+        X_down = X // ds_xy
+        
+        # Single frame size (one channel, downsampled)
+        single_frame_bytes = Z_down * Y_down * X_down * bytes_per_pixel
+        single_frame_mb = single_frame_bytes / (1024**2)
+        single_frame_gb = single_frame_bytes / (1024**3)
+        
+        # Mid window calculation (for initial reference)
+        mid_window_minutes = config['reference']['mid_window_size']
+        mid_stride = config['reference']['mid_stride']
+        mid_window_frames = int(mid_window_minutes * 60 * fps)
+        mid_window_frames_used = mid_window_frames // mid_stride  # Frames actually loaded
+        
+        # GPU memory for mid_window reference calculation (both channels loaded)
+        n_channels_loaded = 2 if config['channels']['dual_channel'] else 1
+        mid_window_gpu_bytes = mid_window_frames_used * single_frame_bytes * n_channels_loaded
+        mid_window_gpu_gb = mid_window_gpu_bytes / (1024**3)
+        
+        # Batch processing memory (per batch)
+        batch_size = config['processing']['batch_size']
+        batch_gpu_bytes = batch_size * single_frame_bytes * n_channels_loaded
+        batch_gpu_gb = batch_gpu_bytes / (1024**3)
+        
+        # Registration working memory (rough estimate: 3-5x single frame for intermediate arrays)
+        registration_overhead_factor = 5
+        registration_working_gb = single_frame_gb * registration_overhead_factor * n_channels_loaded
+        
+        # Total GPU memory estimate
+        total_gpu_needed_mid = mid_window_gpu_gb + registration_working_gb
+        total_gpu_needed_batch = batch_gpu_gb + registration_working_gb
+        
+        # CPU/System memory (need to hold full dataset + working memory)
+        full_dataset_bytes = T * Z * Y * X * bytes_per_pixel * C
+        full_dataset_gb = full_dataset_bytes / (1024**3)
+        cpu_working_memory_gb = max(total_gpu_needed_mid, total_gpu_needed_batch) * 2  # Buffer for CPU operations
+        total_cpu_recommended = full_dataset_gb + cpu_working_memory_gb
+        
+        print(f"  Data dimensions (T,Z,C,Y,X): {(T, Z, C, Y, X)}")
+        print(f"  Data type                 : {data_dtype} ({bytes_per_pixel} bytes/pixel)")
+        print(f"  Downsampled frame size    : {Z_down} x {Y_down} x {X_down} = {single_frame_mb:.1f} MB/frame/channel")
+        print(f"  ")
+        print(f"  --- Initial Reference (mid_window) ---")
+        print(f"  Mid window: {mid_window_minutes} min = {mid_window_frames} frames (using every {mid_stride}th = {mid_window_frames_used} frames)")
+        print(f"  GPU memory for mid_window : {mid_window_gpu_gb:.1f} GB ({n_channels_loaded} channel(s))")
+        print(f"  + Registration overhead   : ~{registration_working_gb:.1f} GB")
+        print(f"  = Total GPU needed (ref)  : ~{total_gpu_needed_mid:.1f} GB")
+        print(f"  ")
+        print(f"  --- Batch Processing ---")
+        print(f"  Batch size: {batch_size} frames")
+        print(f"  GPU memory per batch      : {batch_gpu_gb:.1f} GB ({n_channels_loaded} channel(s))")
+        print(f"  + Registration overhead   : ~{registration_working_gb:.1f} GB")
+        print(f"  = Total GPU needed (batch): ~{total_gpu_needed_batch:.1f} GB")
+        print(f"  ")
+        print(f"  --- System (CPU) Memory ---")
+        print(f"  Full dataset size         : {full_dataset_gb:.1f} GB")
+        print(f"  Recommended system RAM    : ~{total_cpu_recommended:.0f} GB")
+        print(f"  ")
+        
+        # Warnings
+        if total_gpu_needed_mid > 40:
+            print(f"  ⚠️  WARNING: mid_window requires {total_gpu_needed_mid:.1f} GB GPU memory!")
+            print(f"      Consider: reducing mid_window_size, increasing mid_stride, or increasing downsampleXY")
+        if total_gpu_needed_batch > 40:
+            print(f"  ⚠️  WARNING: batch processing requires {total_gpu_needed_batch:.1f} GB GPU memory!")
+            print(f"      Consider: reducing batch_size or increasing downsampleXY")
 
         print("--------------------------------------------------")
         print("[INFO]Configuration loaded successfully.\n")

@@ -72,6 +72,7 @@ def readMeta_new(filePath,Ifprint=True):
     with nd2.ND2File(filePath) as ndf:
         data = ndf.to_dask()
         data_shape = data.shape
+        data_dtype = data.dtype  # Get the actual data type
 
         if hasattr(ndf.metadata, "channels"):
             resolutionxyz = ndf.metadata.channels[0].volume.axesCalibration
@@ -139,6 +140,8 @@ def readMeta_new(filePath,Ifprint=True):
     'nchannels': nchannels,
     'resolutionxyz': resolutionxyz,
     'data_shape': data_shape,
+    'dtype': data_dtype,  # Data type (e.g., uint16, float32)
+    'bytes_per_pixel': data_dtype.itemsize,  # Bytes per pixel
     'spacing_x': spacing_x,
     'spacing_y': spacing_y,
     'spacing_z': spacing_z,
