@@ -1,34 +1,63 @@
-// Prompt user for folder
+// Set starting directory and prompt user
+startPath = "/nrs/ahrens/Virginia_nrs/wVT/";
+call("ij.io.OpenDialog.setDefaultDirectory", startPath);
 dir = getDirectory("Select folder containing TIFF volumes");
 
-// Get list of TIFF files
+// Get list of files
 list = getFileList(dir);
-tiffFiles = newArray();
-for (i = 0; i < list.length; i++) {
-    if (endsWith(toLowerCase(list[i]), ".tif") || endsWith(toLowerCase(list[i]), ".tiff")) {
-        tiffFiles = Array.concat(tiffFiles, list[i]);
-    }
+nTotalFiles = list.length;
+
+if (nTotalFiles == 0) {
+    exit("No files found in selected folder");
 }
 
-nTimepoints = tiffFiles.length;
-if (nTimepoints == 0) {
-    exit("No TIFF files found in selected folder");
-}
-
-// Open first image to get dimensions
-open(dir + tiffFiles[0]);
+// Open first file to get dimensions
+open(dir + list[0]);
 getDimensions(width, height, nChannels, zDepth, frames);
+slicesPerFile = nSlices();
+print("First file: " + width + "x" + height + ", nSlices=" + slicesPerFile + ", nChannels=" + nChannels + ", zDepth=" + zDepth + ", frames=" + frames);
 close();
 
-print("Found " + nTimepoints + " files");
-print("Each file: " + zDepth + " Z slices, " + nChannels + " channels");
-print("Will create hyperstack: C=" + nChannels + ", Z=" + zDepth + ", T=" + nTimepoints);
+// Get loading options from user
+Dialog.create("Loading Options");
+Dialog.addMessage("Found " + nTotalFiles + " files");
+Dialog.addMessage("First file: " + width + "x" + height + ", " + slicesPerFile + " slices (" + nChannels + "C x " + zDepth + "Z)");
+Dialog.addCheckbox("Load all files", false);
+Dialog.addNumber("Or load every N files:", 10);
+Dialog.show();
+loadAll = Dialog.getCheckbox();
+stepSize = Dialog.getNumber();
 
-// Import the full sequence
-run("Image Sequence...", "open=[" + dir + "] sort");
+if (loadAll) {
+    stepSize = 1;
+}
+
+// Count how many we'll load
+nTimepoints = floor(nTotalFiles / stepSize);
+if (nTotalFiles % stepSize != 0) nTimepoints = nTimepoints + 1;
+
+print("Loading " + nTimepoints + " files (every " + stepSize + " of " + nTotalFiles + ")");
+print("Each file: " + nChannels + "C x " + zDepth + "Z = " + slicesPerFile + " slices");
+
+// Open files
+setBatchMode(true);
+count = 0;
+for (i = 0; i < nTotalFiles; i += stepSize) {
+    showProgress(count, nTimepoints);
+    open(dir + list[i]);
+    if (count == 0) {
+        rename("Stack");
+    } else {
+        run("Concatenate...", "  title=Stack image1=Stack image2=[" + getTitle() + "] image3=[-- None --]");
+    }
+    count++;
+}
+setBatchMode(false);
 
 // Reshape to hyperstack
-run("Stack to Hyperstack...", "order=xyczt(default) channels=" + nChannels + " slices=" + zDepth + " frames=" + nTimepoints + " display=Composite");
+if (zDepth > 1 || nChannels > 1) {
+    run("Stack to Hyperstack...", "order=xyczt(default) channels=" + nChannels + " slices=" + zDepth + " frames=" + count + " display=Composite");
+}
 
 // Auto contrast for each channel
 for (c = 1; c <= nChannels; c++) {
@@ -36,4 +65,4 @@ for (c = 1; c <= nChannels; c++) {
     run("Enhance Contrast", "saturated=0.35");
 }
 
-print("Done!");
+print("Done! Loaded " + count + " files.");
