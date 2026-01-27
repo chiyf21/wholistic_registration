@@ -1,54 +1,45 @@
 from core import main_function
 
-## Define data path and the normal config
-main_function.DefineParams(
-    configFile='./configs/config.toml',
-    inputFile='/home/cyf/wbi/Virginia/f338/221124_f338_ubi_gCaMP7f_bactin_mCherry_CAAX_7dpf002.nd2',
-    outputFile='./registrated_data/f338_registrated.zarr',
-    downsampleT=20, 
-    downsampleXY=4,  #choose downsample rate for registration(indenpendent to the dowsample below,just for accurate my debug)
-    downsampleZ=[4,5,6], #choose which planes to use
-    chunk_size=20,
-    mid_chunk_size=40,
-    k=50,
-    layer=1,
-    function='log10',
-    dual_channel=True,
-    verbose=False
-)
+## Since CUDA requires the spawn start method, we must wrap the code in if __name__ == "__main__": if you want to parallelize the code.
 
-## read in parameters from the config file
-# config = toml.load('./configs/config.toml') # TBD
+if __name__ == "__main__":
+    configFile='./code/wholistic_registration/configs/config_0120.toml'
+    # Define data path and the normal config
+    main_function.DefineParams(
+        configFile=configFile, 
+        inputFile='/home/cyf/wbi/Virginia/raw_data/f338/221124_f338_ubi_gCaMP7f_bactin_mCherry_CAAX_7dpf002.nd2',
+        outputFile='/home/cyf/wbi/Virginia/registrated_data/f338/f338_registrated_0120', 
+        downsampleXY=1,
+        dual_channel=True,
+        downsampleZ=[4,5,6], #choose which planes to use
+        window_size=15, ##  minutes
+        mid_window_size=15, ## minutes
+        verbose=True
+    )
 
-## Do registration
-main_function.Registration(
-    './configs/config.toml'
-)
+    ###########################################################################################
+    ### main process 
+    # Do registration
+    main_function.Registration_v3(
+        configFile,
+        parallel=True
+    )
 
-# # create downsample data
-# main_function.create_downsample_dataset_v2(
-#     './wbi_1201/configs/config.toml',
-#     downsampleFilePath='./registrated_data/f338_1218registrated_downsample/',
-#     ds_XY=4,
-#     ds_T=5,
-#     block_size=10
-# )
-## create downsample data
-main_function.create_downsample_dataset(
-    './configs/config.toml',
-    downsampleFilePath='./registrated_data/f338_registrated_downsample.zarr',
-    ds_XY=4,
-    ds_T=4
-)
+    # reliable analysis
+    main_function.ReliableAnalysis(
+        configFile,
+    )
 
-
-
-# ## reliable analysis
-main_function.ReliableAnalysis(
-    './wbi_1201/configs/config.toml',
-    ds_XY=4,
-    ds_T=5
-)
-##reference comparation
-#main_function.ReferenceComparation( './wbi_1201/configs/config.toml')
+    
+    ###########################################################################################
+    ### visualization
+    #consistent of the mask
+    # # ## create downsample data
+    main_function.create_downsample_dataset_v3(
+        configFile,
+        downsampleFilePath='./registrated_data/f338/f338_registrated_0121_downsample/',
+        ds_XY=4,
+        ds_T=1,
+        block_size=50
+    )
 
