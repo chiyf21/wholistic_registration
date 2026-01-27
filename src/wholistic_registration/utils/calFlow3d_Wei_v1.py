@@ -490,7 +490,15 @@ def getMotion(dat_mov, dat_ref, option, verbose=False):
             
             # Save motion field periodically for logging
             if iter % option["save_ite"] == 0:
-                error_log[f"layer_{layer}"]["data_mov_corrected"].append(data_mov_corrected)
+                # Convert GPU arrays to CPU before storing to avoid GPU memory accumulation
+                if hasattr(data_mov_corrected, "get"):
+                    error_log[f"layer_{layer}"]["data_mov_corrected"].append(
+                        cp.asnumpy(data_mov_corrected).copy()
+                    )
+                else:
+                    error_log[f"layer_{layer}"]["data_mov_corrected"].append(
+                        np.asarray(data_mov_corrected).copy()
+                    )
                 if hasattr(motion_current, "get"):
                     error_log[f"layer_{layer}"]["motion_current"].append(
                         cp.asnumpy(motion_current).copy()
