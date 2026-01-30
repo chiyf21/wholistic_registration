@@ -159,7 +159,99 @@ def local_ssim_difference(I_ref,I_mov,win_size=11,use_3d=False,sigma_3d=1.5):
         D = (1 - ssim_map) / 2
 
         return np.clip(D.astype(np.float32), 0, 1)
-    
+
+def local_mind_difference(
+    I_ref,
+    I_mov,
+    patch_sigma=3,
+    offset_radius=5,
+    structure_thresh=0.6,
+    eps=1e-6,
+):
+    """
+    GPU MIND-based local misalignment map with explicit masking of background.
+
+    Output semantics:
+        - 0 → background or perfectly aligned
+        - larger → worse local registration (misalignment)
+        - completely ignores areas with no structure
+
+    Supports 2D or 3D (slice-wise) images.
+    """
+
+    # ---------------------------
+    # helpers
+    # ---------------------------
+    def _mind_offsets_2d(radius):
+        return [
+            ( radius, 0),
+            (-radius, 0),
+            (0,  radius),
+            (0, -radius),
+            ( radius,  radius),
+            ( radius, -radius),
+            (-radius,  radius),
+            (-radius, -radius),
+        ]
+
+    def _mind_descriptor_2d(I):
+        I = cp.asarray(I, dtype=cp.float32)
+        offsets = _mind_offsets_2d(offset_radius)
+        H, W = I.shape
+        K = len(offsets)
+
+        # smooth image to suppress noise
+        I_s = cupy_ndimage.gaussian_filter(I, patch_sigma)
+        D = cp.empty((K, H, W), dtype=cp.float32)
+
+        for k, (dy, dx) in enumerate(offsets):
+            I_shift = cp.roll(I_s, shift=(dy, dx), axis=(0, 1))
+            diff2 = (I_s - I_shift) ** 2
+            D[k] = cupy_ndimage.gaussian_filter(diff2, patch_sigma)
+
+        V = cp.mean(D, axis=0) + eps
+        MIND = cp.exp(-D / V[None])
+        return MIND
+
+    def _mind_diff_2d(Ir, Im):
+        M_ref = _mind_descriptor_2d(Ir)
+        M_mov = _mind_descriptor_2d(Im)
+
+        diff = cp.mean(cp.abs(M_ref - M_mov), axis=0)
+
+        # --------- structure mask ---------
+        structure = cp.mean(M_ref, axis=0)
+        mask = structure > structure_thresh
+
+        # scale using only structured regions
+        # apply hard mask: background = 0
+        diff = diff * mask.astype(cp.float32)
+
+        return cp.clip(diff**2, 0, 1)
+
+    # ---------------------------
+    # main
+    # ---------------------------
+    I_ref = cp.asarray(I_ref)
+    I_mov = cp.asarray(I_mov)
+
+    if I_ref.shape != I_mov.shape:
+        raise ValueError("[ERROR] I_ref and I_mov must have the same shape")
+
+    if I_ref.ndim == 2:
+        return _mind_diff_2d(I_ref, I_mov)
+
+    elif I_ref.ndim == 3:
+        Z, H, W = I_ref.shape
+        diff = cp.zeros((Z, H, W), dtype=cp.float32)
+        for z in range(Z):
+            diff[z] = _mind_diff_2d(I_ref[z], I_mov[z])
+        return diff
+
+    else:
+        raise ValueError("Only 2D or 3D images are supported")
+
+
 def build_reference_index(ref_dir):
     """
     scan reference folder, construct frame -> filepath
@@ -194,6 +286,7 @@ def ComputMask(
                 ca_dir,
                 ref_dir,
                 out_dir,
+                frames,
                 config,
                 compute_cor_fn,
                 configPath,
@@ -249,7 +342,7 @@ def ComputMask(
     ref_map, _ = build_reference_index(ref_dir)
     
     # Process each frame
-    for i in range(T):
+    for i in frames:
         if i % 100 == 0:
             print(f"Processed {i}/{T} frames")
         
@@ -264,18 +357,32 @@ def ComputMask(
         ref_i = tifffile.imread(ref_map[i])
 
         # Extract configuration parameters
-        win_size = config['win_size']      # Window size for SSIM computation
-        use_3d = config['use_3d']          # Whether to use 3D SSIM
-        sigma_3d = config['sigma_3d']      # Sigma for 3D Gaussian blur
+        # win_size = config['win_size']      # Window size for SSIM computation
+        # use_3d = config['use_3d']          # Whether to use 3D SSIM
+        # sigma_3d = config['sigma_3d']      # Sigma for 3D Gaussian blur
         
         # Compute reliability mask using SSIM difference
-        mask_map = local_ssim_difference(cor_i, ref_i, win_size, use_3d, sigma_3d)
-        
-        # Save downsampled mask
-        IO.write_multichannel_volume_as_ome_tiff(
-            volume=[mask_map],      # single channel
-            out_dir=out_dir,
-            frame_idx=i,
-            configPath=configPath,
-            label='mask'
-        )
+        # mask_map = local_gradient_misalignment(cor_i, ref_i)
+        mask_map = local_mind_difference(ref_i,
+                                        cor_i,
+                                        config['patch_sigma'],
+                                        config['offset_radius'],
+                                        config['structure_thresh'],
+                                        config['eps'])
+        if isinstance(mask_map,np.ndarray):
+            # Save downsampled mask
+            IO.write_multichannel_volume_as_ome_tiff(
+                volume=[mask_map],      # single channel
+                out_dir=out_dir,
+                frame_idx=i,
+                configPath=configPath,
+                label='mask'
+            )
+        else:
+            IO.write_multichannel_volume_as_ome_tiff(
+                volume=[mask_map.get()],      # single channel
+                out_dir=out_dir,
+                frame_idx=i,
+                configPath=configPath,
+                label='mask'
+            )

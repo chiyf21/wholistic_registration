@@ -33,7 +33,7 @@ def transform(image,k=1,method="raw"):
         return k*np.log10(1+image)
     else:
         raise ValueError(f"Unknown method to process the image:{method}")
-def wbi_registration_2d(moving_membrane_image,moving_Ca_image,config_file,reference_image=None,motion_init=None,verbose=True,frame=None):
+def wbi_registration_2d(moving_membrane_image,moving_Ca_image,config_file,reference_image=None,motion_init=None,verbose=True,frame=None,direction='forward'):
 
     '''Load the config file'''
     config=toml.load(config_file)
@@ -73,7 +73,7 @@ def wbi_registration_2d(moving_membrane_image,moving_Ca_image,config_file,refere
 
     # visualization.visualize_2d_image(dat_ref_1plane,title="Reference Image")
     # stack the refence to get a fake 3D image
-    dat_ref=np.stack([dat_ref_1plane] * 3, axis=2)
+    dat_ref=np.stack([dat_ref_1plane] * 2, axis=2)
 
 
     '''Get mask'''
@@ -96,7 +96,7 @@ def wbi_registration_2d(moving_membrane_image,moving_Ca_image,config_file,refere
     if motion_init is None:
         option['motion']=np.zeros([dat_ref.shape[0],dat_ref.shape[1],2,3])
     else:
-        option['motion']=motion_init
+        option['motion']=np.stack([motion_init]*2,axis=2)
     #initial the pyramid parameters
     pyramid=config["pyramid"]
     option['r']=pyramid["r"]
@@ -114,11 +114,11 @@ def wbi_registration_2d(moving_membrane_image,moving_Ca_image,config_file,refere
     for i in frames:
         #get dat_mov
         mem_1plane=moving_membrane_image[i,:,:]
-        dat_mem=np.stack([mem_1plane] * 3, axis=2)
+        dat_mem=np.stack([mem_1plane] * 2, axis=2)
 
         if channels["dual_channel"]:
             Ca_1plane=moving_Ca_image[i,:,:]
-            dat_ca=np.stack([Ca_1plane] * 3, axis=2)
+            dat_ca=np.stack([Ca_1plane] * 2, axis=2)
         
         if channels["dual_channel"]:
             dat_ca_tran=transform(dat_ca,channels["k"],channels["function"])
@@ -144,10 +144,11 @@ def wbi_registration_2d(moving_membrane_image,moving_Ca_image,config_file,refere
 
         #print error
         if verbose==True:
-            if frame is not None:
+            if frame is None:
                 print(f"        Frame: {i+1}\tInitial Error is:{initial_error}\tEventual Error: {eventual_error}")
             else:
-                print(f"        Frame: {frame}\tInitial Error is:{initial_error}\tEventual Error: {eventual_error}")
+                print(f"        Frame: {frame[i]}\tInitial Error is:{initial_error}\tEventual Error: {eventual_error}")
+
         error=dict[
             "initial_error":initial_error,
             "eventual_error":eventual_error
@@ -167,7 +168,7 @@ def wbi_registration_2d(moving_membrane_image,moving_Ca_image,config_file,refere
     motion_out = np.asarray(motions)
     return mem_out, ca_out, dat_ref, errors, motion_out
 
-def wbi_registration_3d(moving_membrane_image,moving_Ca_image,config_file,reference_image=None,motion_init=None,verbose=True,frame=None):
+def wbi_registration_3d(moving_membrane_image,moving_Ca_image,config_file,reference_image=None,motion_init=None,verbose=True,frame=None,direction='forward'):
     '''Load the config file'''
     config=toml.load(config_file)
 
@@ -272,8 +273,7 @@ def wbi_registration_3d(moving_membrane_image,moving_Ca_image,config_file,refere
             if frame is None:
                 print(f"        Frame: {i+1}\tInitial Error is:{initial_error:.4f}\tEventual Error: {eventual_error:.4f}")
             else:
-                print(f"        Frame: {frame}\tInitial Error is:{initial_error:.4f}\tEventual Error: {eventual_error:.4f}")
-                frame=frame+1
+                print(f"        Frame: {frame[i]}\tInitial Error is:{initial_error:.4f}\tEventual Error: {eventual_error:.4f}")
         error=dict[
             "initial_error":initial_error,
             "eventual_error":eventual_error

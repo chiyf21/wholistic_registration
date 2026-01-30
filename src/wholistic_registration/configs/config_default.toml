@@ -43,6 +43,19 @@ spacing_z=9.0
 downsampleXY=1
 downsampleZ=[0]
 
+[frames]
+#Params:
+#   -frame_downsample
+#       We will process the dataset every {frame_downsample} frames
+#       e.g.: frame_downsample=3, it means we will process frame[0], frame[3], frame[6], and so on.
+#   -frames
+#       The frame we will process, the default is all the frames, you could also provide a input like: (t0,t1),
+#       and we will process frame[t0] ~ frame[t1] (beginning at 0), it will also be influenced by frame_downsample
+#Example:
+#   frame_downsample=2, frames=(0,999)
+#   Then we will process the frame:0, 2, 4, 6, ...,998 (total 500 frames)
+frame_downsample=1
+frames=[0]
 
 [file_path]
 #Params:
@@ -136,15 +149,23 @@ smoothPenalty=0.08
 
 [ReliableAnalysis]
 #Params:
-#   -win_size
-#       The size of time(minutes, frames / frame_rate) we will use to process each time
-#   -use_3d
-#       Whether to use 3D motion model
-#   -sigma_3d
-#       The standard deviation of the 3D motion model
-win_size=11
-use_3d=false
-sigma_3d=1.5
+#   -patch_sigma : float
+#       Gaussian smoothing applied to the image before computing patch-based SSDs.
+#       Larger values suppress noise but also blur fine structures.
+#   -offset_radius : int (pixels)
+#      Distance of neighborhood offsets for MIND descriptor computation.
+#      Determines the size of the local neighborhood used to capture structure patterns.
+#   -norm_percentile : float (0-100)
+#      Percentile used to normalize the difference map.
+#      Only pixels within structured regions are considered.
+#      Controls the sensitivity of the resulting misalignment map (lower → more sensitive).
+#   -structure_thresh : float (0-1)
+#      Threshold for identifying structured (informative) regions based on MIND descriptor values.
+#      Pixels below this threshold are treated as background and set to zero in the output map.
+patch_sigma=3.0
+offset_radius=5
+structure_thresh=0.6
+eps=1e-6
 
 
 [processing]

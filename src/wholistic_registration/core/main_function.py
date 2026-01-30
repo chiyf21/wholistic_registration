@@ -16,14 +16,17 @@ def DefineParams(
                 outputFile=None,
                 downsampleXY=1,
                 downsampleZ=-1,
+                frame_downsample=1, # We will process the dataset every {frame_downsample} frames
+                frames=None,#The frame we will process, the default is all the frames, you could also provide a input like: (t0,t1), and we will process frame[t0] ~ frame[t1] (beginning at 0), it will also be influenced by frame_downsample
                 dual_channel=False,
                 function='raw',
                 k=0.,
                 batch_size=100,
+                time_measurement='minute',
                 mid_window_size=100,
                 window_size=1,
                 mid_stride=10,
-                referece_chunk=50,
+                reference_chunk=1,
                 preprocess=False,
                 thresFactor=5,
                 maskRange=[5,4000],
@@ -32,9 +35,10 @@ def DefineParams(
                 iter=10,
                 smoothPenalty=0.08,
                 tolerance=1e-3,
-                win_size=11,
-                use_3d=False,
-                sigma_3d=1.5,
+                patch_sigma=3.,
+                offset_radius=5,
+                structure_thresh=0.6,
+                eps=1e-6,
                 save_ref=True,
                 save_motion=False,
                 verbose=True
@@ -92,18 +96,34 @@ def DefineParams(
 
     [reference]
     Params:
+    -time_measurement
+        'minute' or 'frame'
+            if time_measurement='minute', then the params "window_size", "mid_window_size", and "reference_chunk" are in minutes
+            if time_measurement='frame', then the params "window_size", "mid_window_size", and "reference_chunk" are in frames
     -pick_reference_auto
         Whether pick the reference image from moving image
         If true, it will pick the reference image from the moving video each several frames
         If false, you need to give a reference image
     -window_size
-        The size of time (minutes, frames / frame_rate) we will use to process each time
+        The size of time we will use to process each time
     -mid_window_size
-        The size of time (minutes, frames / frame_rate) we will use to pick the initial reference from the middle block
-    -mid_stride
-        We needn't use all of the frames of the middle window to compute reference, so we pick frames every mid_stride frames
+        The size of time we will use to pick the initial reference from the middle block
     -reference_chunk
         The size of frames we will use to compute reference
+    -mid_stride
+        We needn't use all of the frames of the middle window to compute reference, so we pick frames every mid_stride frames
+
+    [frames]
+    Params:
+      -frame_downsample
+          We will process the dataset every {frame_downsample} frames
+          e.g.: frame_downsample=3, it means we will process frame[0], frame[3], frame[6], and so on.
+      -frames
+          The frame we will process, the default is all the frames, you could also provide a input like: (t0,t1),
+          and we will process frame[t0] ~ frame[t1] (beginning at 0), it will also be influenced by frame_downsample
+    Example:
+      frame_downsample=2, frames=(0,999)
+      Then we will process the frame:0, 2, 4, 6, ...,998 (total 500 frames)
 
     [mask]
     Params:
@@ -143,13 +163,19 @@ def DefineParams(
 
     [ReliableAnalysis]
     Params:
-    -win_size : int(pixels)
-        SSIM window size for 2D (odd number like 11, 21). 
-    -use_3d : bool
-        If True, compute a true 3D SSIM approximation using Gaussian smoothing.
-        If False, compute 2D SSIM slice-by-slice for 3D volumes (recommended for microscopy).
-    -sigma_3d : float or tuple
-        Gaussian sigma used in 3D SSIM approximation mode.
+    -patch_sigma : float
+        Gaussian smoothing applied to the image before computing patch-based SSDs.
+        Larger values suppress noise but also blur fine structures.
+    -offset_radius : int (pixels)
+        Distance of neighborhood offsets for MIND descriptor computation.
+        Determines the size of the local neighborhood used to capture structure patterns.
+    -norm_percentile : float (0-100)
+        Percentile used to normalize the difference map.
+        Only pixels within structured regions are considered.
+        Controls the sensitivity of the resulting misalignment map (lower → more sensitive).
+    -structure_thresh : float (0-1)
+        Threshold for identifying structured (informative) regions based on MIND descriptor values.
+        Pixels below this threshold are treated as background and set to zero in the output map.
     '''
     ## read the metadata
     print("Reading meta data")
@@ -207,8 +233,15 @@ def DefineParams(
     #change the downsample config
     config['downsample']['downsampleXY']=downsampleXY
     config['downsample']['downsampleZ']=downsampleZ
-     
-    
+
+    #change the frames config
+    if frames is None:
+        config['frames']['frames']=list(range(0,nframes,frame_downsample))
+    else:
+        config['frames']['frames']=list(range(frames[0], frames[1], frame_downsample))
+
+    config['frames']['frame_downsample']=frame_downsample
+
     #change the filepath
     config['file_path']['input_path']=inputFile
     config['file_path']['registrated_path']=outputFile
@@ -220,13 +253,34 @@ def DefineParams(
     config['channels']['k']=k
 
     #change the reference config
+    config['reference']['time_measurement']=time_measurement  # default is 'minute'
     config['reference']['pick_reference_auto']=False
     config['reference']['mid_window_size']=mid_window_size
     config['reference']['window_size']=window_size
     config['reference']['mid_stride']=mid_stride
-    config['reference']['reference_chunk']=referece_chunk
+    config['reference']['reference_chunk']=reference_chunk
+    if reference_chunk > window_size:
+        raise ValueError("[ERROR]reference_chunk should be less than or equal to window_size.")
+    if time_measurement == 'minute':
 
+        mid_window_size_minutes = mid_window_size
+        window_size_minutes = window_size
+        reference_chunk_minutes = reference_chunk
 
+        mid_window_size_frames = int(mid_window_size * 60 * framerate)
+        window_size_frames = int(window_size * 60 * framerate)
+        reference_chunk_frames = int(reference_chunk * 60 * framerate)
+
+    elif time_measurement == 'frame':
+        mid_window_size_minutes = mid_window_size / (60 * framerate)
+        window_size_minutes = window_size / (60 * framerate)
+        reference_chunk_minutes = reference_chunk / (60 * framerate)
+
+        mid_window_size_frames = mid_window_size
+        window_size_frames = window_size
+        reference_chunk_frames = reference_chunk
+    else:
+        raise ValueError("[ERROR]time_measurement should be 'minute' or 'frame'.")
     #change the preprocess config
     config['preprocess']['normalize_to_0_255']=preprocess
 
@@ -245,9 +299,10 @@ def DefineParams(
     config['pyramid']['tolerance']=tolerance
 
     #change the ReliableAnalysis config
-    config['ReliableAnalysis']['win_size']=win_size
-    config['ReliableAnalysis']['use_3d']=use_3d
-    config['ReliableAnalysis']['sigma_3d']=sigma_3d
+    config['ReliableAnalysis']['patch_sigma']=patch_sigma
+    config['ReliableAnalysis']['offset_radius']=offset_radius
+    config['ReliableAnalysis']['structure_thresh']=structure_thresh
+    config['ReliableAnalysis']['eps']=eps
 
     # change the save config
     config['save_config']['save_ref'] = save_ref
@@ -284,6 +339,7 @@ def DefineParams(
             print(f"  Z : {config['downsample']['downsampleZ']}")
 
 
+
         print("\n[File Path]")
         print(f"  input_path :  {config['file_path']['input_path']}")
         print(f"  registrated_path: {config['file_path']['registrated_path']}")
@@ -296,9 +352,15 @@ def DefineParams(
         print("\n[Processing]")
         print(f"  batch_size        : {config['processing']['batch_size']} frames per batch")
 
+        print("\n[Frames]")
+        print(f" Processing frames: from frame {config['frames']['frames'][0]} to frame {config['frames']['frames'][-1]} with stride {frame_downsample}, totoal frames is {len(config['frames']['frames'])}")
+
         print("\n[Reference]")
-        print(f"  mid_window_size         : {config['reference']['mid_window_size']} minutes {int(config['reference']['mid_window_size']*60*config['MetaData']['fps'])} frames")
-        print(f"  window_size             : {config['reference']['window_size']} minutes {int(config['reference']['window_size']*60*config['MetaData']['fps'])} frames")
+        print(f"  mid_window_size      : {mid_window_size_minutes} minutes {mid_window_size_frames} frames (process {int(mid_window_size_frames/frame_downsample)} frames)")
+        print(f"  window_size          : {window_size_minutes} minutes {window_size_frames} frames (process {int(window_size_frames/frame_downsample)} frames)")
+        print(f"  reference_chunk      : {reference_chunk_minutes} minutes {reference_chunk_frames} frames (use {int(reference_chunk_frames/frame_downsample)} frames)")
+
+
         print("\n[Preprocess]")
         print(f"  normalize_to_0_255 : {config['preprocess']['normalize_to_0_255']}")
 
@@ -314,9 +376,9 @@ def DefineParams(
         print(f"  tolerance     : {config['pyramid']['tolerance']}")
 
         print("\n[ReliableAnalysis]")
-        print(f"  win_size     : {config['ReliableAnalysis']['win_size']} pixels")
-        print(f"  use_3d       : {config['ReliableAnalysis']['use_3d']}")
-        print(f"  sigma_3d     : {config['ReliableAnalysis']['sigma_3d']}")
+        print(f"  patch_sigma(0~1)       : {config['ReliableAnalysis']['patch_sigma']}")
+        print(f"  offset_radius          : {config['ReliableAnalysis']['offset_radius']}")
+        print(f"  structure_thresh(0~100): {config['ReliableAnalysis']['structure_thresh']}")
 
         # ========== Resource Estimation Section ==========
         print("\n[Resource Estimation]")
@@ -344,9 +406,14 @@ def DefineParams(
         single_frame_gb = single_frame_bytes / (1024**3)
         
         # Mid window calculation (for initial reference)
-        mid_window_minutes = config['reference']['mid_window_size']
+        mid_window = config['reference']['mid_window_size']
         mid_stride = config['reference']['mid_stride']
-        mid_window_frames = int(mid_window_minutes * 60 * fps)
+        if config['reference']['time_measurement'] == 'minute':
+            mid_window_frames = int(mid_window * 60 * fps)
+        elif config['reference']['time_measurement'] == 'frame':
+            mid_window_frames = int(mid_window)
+        else:
+            raise ValueError("[ERROR]Invalid time_measurement in reference config.")
         mid_window_frames_used = mid_window_frames // mid_stride  # Frames actually loaded
         
         # GPU memory for mid_window reference calculation (both channels loaded)
@@ -378,7 +445,7 @@ def DefineParams(
         print(f"  Downsampled frame size    : {Z_down} x {Y_down} x {X_down} = {single_frame_mb:.1f} MB/frame/channel")
         print(f"  ")
         print(f"  --- Initial Reference (mid_window) ---")
-        print(f"  Mid window: {mid_window_minutes} min = {mid_window_frames} frames (using every {mid_stride}th = {mid_window_frames_used} frames)")
+        print(f"  Mid window: {mid_window_size_minutes} min = {mid_window_frames} frames (using every {mid_stride}th = {mid_window_frames_used} frames)")
         print(f"  GPU memory for mid_window : {mid_window_gpu_gb:.1f} GB ({n_channels_loaded} channel(s))")
         print(f"  + Registration overhead   : ~{registration_working_gb:.1f} GB")
         print(f"  = Total GPU needed (ref)  : ~{total_gpu_needed_mid:.1f} GB")
@@ -458,12 +525,23 @@ def Registration_v3(configPath='./configs/config.toml', parallel=True):
     Dim = config['MetaData']['Dim']
     total_frames = int(config['MetaData']['frames'])
 
+    # frames to process
+    process_frames = config['frames']['frames']
+    frame_downsample=config['frames']['frame_downsample']
+    total_process_frames = len(process_frames)
+
     # downsample params and the frames we need to process
     downsampleXY = config['downsample']['downsampleXY']
     downsampleZ = config['downsample']['downsampleZ']
     window_size = config['reference']['window_size']
-    window_size_frames = int(window_size*60* config['MetaData']['fps'])  # convert minutes to frames
 
+    if config['reference']['time_measurement'] == 'minute':
+        window_size_frames = int(window_size*60* config['MetaData']['fps'] / frame_downsample)  # convert minutes to frames
+    elif config['reference']['time_measurement'] == 'frame':
+        window_size_frames = int(window_size / frame_downsample)  # already in frames
+    else:
+        raise ValueError("[ERROR]Invalid time_measurement in reference config.")
+    
     # Process downsampleZ: if -1, use all Z slices
     if Dim == 3:
         if downsampleZ == -1:
@@ -499,11 +577,15 @@ def Registration_v3(configPath='./configs/config.toml', parallel=True):
     print("[INFO]Processing middle chunk to build initial reference...")
     batch_size=config['processing']['batch_size'] # Frames per reference update and process frames to save memory
     mid_window_size = int(config['reference']['mid_window_size'])  # Window size for initial reference in minutes
-    mid_window_size_frames = int(mid_window_size * 60 * config['MetaData']['fps'])  # Convert to frames
-    
+    if config['reference']['time_measurement'] == 'minute':
+        mid_window_size_frames = int(mid_window_size * 60 * config['MetaData']['fps'] / frame_downsample)  # Convert to frames
+    elif config['reference']['time_measurement'] == 'frame':
+        mid_window_size_frames = int(mid_window_size / frame_downsample)  # Already in frames\
+    else:
+        raise ValueError("[ERROR]Invalid time_measurement in reference config.")
     # Calculate the middle window position
     half_chunk = mid_window_size_frames // 2
-    total_mid = total_frames // 2  # Middle frame of entire dataset
+    total_mid = total_process_frames // 2  # Middle frame of entire dataset
     mid_start = total_mid - half_chunk  # Start frame of middle window
     mid_end = mid_start + mid_window_size_frames  # End frame of middle window
     
@@ -514,10 +596,10 @@ def Registration_v3(configPath='./configs/config.toml', parallel=True):
     frames_mid = list(range(mid_start, mid_end+1))  # List of frames in middle window
 
     # load all of the frames to the memory is so memory-comsuming, so we downsample the frames
-    mem_mid_downsample = IO.readND2Frame(movingFilePath, list(range(mid_start, mid_end, mid_stride)), downsampleZ, channel=1, xy_down=downsampleXY, verbose=False)
-    ca_mid_downsample = IO.readND2Frame(movingFilePath, list(range(mid_start, mid_end, mid_stride)), downsampleZ, channel=0, xy_down=downsampleXY, verbose=False)
-    print(f"[INFO]Loaded middle block frames {frames_mid[0]} to {frames_mid[-1]} ({mid_window_size} minutes)")
-    
+    mem_mid_downsample = IO.readND2Frame(movingFilePath, [process_frames[i] for i in list(range(mid_start, mid_end, mid_stride))], downsampleZ, channel=1, xy_down=downsampleXY, verbose=False)
+    ca_mid_downsample = IO.readND2Frame(movingFilePath, [process_frames[i] for i in list(range(mid_start, mid_end, mid_stride))], downsampleZ, channel=0, xy_down=downsampleXY, verbose=False)
+    print(f"[INFO]Loaded middle block frames {process_frames[frames_mid[0]]} to {process_frames[frames_mid[-1]]} with frames downsample {frame_downsample} ({mid_window_size} minutes)")
+
     # Remove singleton dimensions
     mem_mid_downsample = np.squeeze(mem_mid_downsample)
     ca_mid_downsample = np.squeeze(ca_mid_downsample)
@@ -525,9 +607,9 @@ def Registration_v3(configPath='./configs/config.toml', parallel=True):
     # Compute initial reference image from middle block
     ref_img = reference.compute_reference_from_block(mem_mid_downsample, ca_mid_downsample, config)
     IO.write_volume_as_ome_tiff(
-        ref_img, out_ref, 'ref',f"{mid_start:06d}_{mid_end:06d}", configPath
+        ref_img, out_ref, 'ref',f"{process_frames[frames_mid[0]]}_{process_frames[frames_mid[-1]]}", configPath
     )
-    print(f"[INFO]Computed initial reference image from middle block frames {frames_mid[0]} to {frames_mid[-1]} ({mid_window_size} minutes) picked every {mid_stride} frames")
+    print(f"[INFO]Computed initial reference image from middle block frames {process_frames[frames_mid[0]]} to {process_frames[frames_mid[-1]]} ({mid_window_size} minutes)")
 
     # Register the middle block using either 2D or 3D registration based on dataset dimension
     print(f"[INFO]Registering middle block...(every {batch_size} frames as a batch)")
@@ -537,7 +619,13 @@ def Registration_v3(configPath='./configs/config.toml', parallel=True):
     from collections import deque
 
     reference_chunk = config['reference']['reference_chunk']
-
+    if config['reference']['time_measurement'] == 'minute':
+        reference_chunk= int(reference_chunk*60* config['MetaData']['fps'] / frame_downsample)  # convert minutes to frames
+    elif config['reference']['time_measurement'] == 'frame':
+        reference_chunk= int(reference_chunk / frame_downsample)  # already in frames
+    else:
+        raise ValueError("[ERROR]Invalid time_measurement in reference config.")
+    
     head_mem = deque(maxlen=reference_chunk)
     head_ca  = deque(maxlen=reference_chunk)
     tail_mem = deque(maxlen=reference_chunk)
@@ -545,7 +633,7 @@ def Registration_v3(configPath='./configs/config.toml', parallel=True):
     num_frames = len(frames_mid)
 
     for i in range(0, num_frames, batch_size):
-        batch_frames = frames_mid[i:i + batch_size]
+        batch_frames = [process_frames[j] for j in list(range(mid_start + i,mid_start + min(num_frames-1,i+batch_size)))]
         mem_batch = IO.readND2Frame(
             movingFilePath, batch_frames, downsampleZ,
             channel=1, xy_down=downsampleXY, verbose=False
@@ -554,19 +642,21 @@ def Registration_v3(configPath='./configs/config.toml', parallel=True):
             movingFilePath, batch_frames, downsampleZ,
             channel=0, xy_down=downsampleXY, verbose=False
         )
-
         mem_batch = np.squeeze(mem_batch)
         ca_batch  = np.squeeze(ca_batch)
 
-        if Dim == 3:
+        if Dim == 3  and len(downsampleZ) > 1:
             mem_reg, ca_reg, _, _, motion = registration.wbi_registration_3d(
-                mem_batch, ca_batch, configPath, ref_img, frame=batch_frames[0]
+                mem_batch, ca_batch, configPath, ref_img, frame=batch_frames
             )
         else:
             mem_reg, ca_reg, _, _, motion = registration.wbi_registration_2d(
-                mem_batch, ca_batch, configPath, ref_img, frame=batch_frames[0]
+                mem_batch, ca_batch, configPath, ref_img, frame=batch_frames
             )
-
+        if i==0:
+            motion_start = motion[0].copy()
+        if i + batch_size >= num_frames:
+            motion_end = motion[-1].copy()
         # save immediately
         for k, fid in enumerate(batch_frames):
             IO.write_volume_as_ome_tiff(
@@ -602,7 +692,7 @@ def Registration_v3(configPath='./configs/config.toml', parallel=True):
 
     ## Detect GPU availability using CuPy
     try:
-        import cupy as cp
+        from utils import cp
         try:
             num_gpus = cp.cuda.runtime.getDeviceCount()  # Get number of available GPUs
             print(f"[INFO]Detected {num_gpus} GPU(s).")
@@ -618,13 +708,14 @@ def Registration_v3(configPath='./configs/config.toml', parallel=True):
     # =========================
     # Process in serial or parallel mode
     # =========================
-    if not parallel:
+    if not parallel or num_gpus < 2:
         # Serial processing: process backward direction first, then forward direction
         print("[INFO]Running in serial mode...")
         
         # Process backward from middle chunk to beginning (frames mid_start to 0)
         process_directional_chunks(
             direction='backward',  # Process frames in reverse order
+            frame_list=process_frames,
             start_frame=mid_start,  # Starting from the beginning of the middle chunk
             end_frame=0,  # Ending at the first frame of the dataset
             init_mem_windows=head_mem,  # Initial membrane reference windows
@@ -645,14 +736,16 @@ def Registration_v3(configPath='./configs/config.toml', parallel=True):
             downsampleZ=downsampleZ,  # Z downsampling parameters
             downsampleXY=downsampleXY,  # XY downsampling factor
             batch_size=batch_size,  # Batch size for processing
-            reference_chunk=reference_chunk  # Reference chunk size
+            reference_chunk=reference_chunk,  # Reference chunk size
+            motion_init=motion_start
         )
 
         # Process forward from middle chunk to end (frames mid_end+1 to total_frames)
         process_directional_chunks(
             direction='forward',  # Process frames in normal order
-            start_frame=mid_end+1,  # Starting from the end of the middle chunk
-            end_frame=total_frames,  # Ending at the last frame of the dataset
+            frame_list=process_frames,
+            start_frame=mid_end,  # Starting from the end of the middle chunk
+            end_frame=total_process_frames,  # Ending at the last frame of the dataset
             init_mem_windows=tail_mem,  # Initial membrane reference windows
             init_ca_windows=tail_ca,  # Initial calcium reference windows
             device_id=None,  # Use CPU (no GPU)
@@ -671,7 +764,8 @@ def Registration_v3(configPath='./configs/config.toml', parallel=True):
             downsampleZ=downsampleZ,
             downsampleXY=downsampleXY,
             batch_size=batch_size,  # Batch size for processing
-            reference_chunk=reference_chunk  # Reference chunk size
+            reference_chunk=reference_chunk,  # Reference chunk size
+            motion_init=motion_end
         )
 
     else:
@@ -683,6 +777,7 @@ def Registration_v3(configPath='./configs/config.toml', parallel=True):
             target=process_directional_chunks,
             kwargs=dict(
                 direction='backward',
+                frame_list=process_frames,
                 start_frame=mid_start,
                 end_frame=0,
                 init_mem_windows=head_mem,
@@ -703,7 +798,8 @@ def Registration_v3(configPath='./configs/config.toml', parallel=True):
                 downsampleZ=downsampleZ,
                 downsampleXY=downsampleXY,
                 batch_size=batch_size,  # Batch size for processing
-                reference_chunk=reference_chunk  # Reference chunk size
+                reference_chunk=reference_chunk,  # Reference chunk size
+                motion_init=motion_start
             )
         )
 
@@ -712,8 +808,9 @@ def Registration_v3(configPath='./configs/config.toml', parallel=True):
             target=process_directional_chunks,
             kwargs=dict(
                 direction='forward',
-                start_frame=mid_end+1,
-                end_frame=total_frames,
+                frame_list=process_frames,
+                start_frame=mid_end,
+                end_frame=total_process_frames,
                 init_mem_windows=tail_mem,
                 init_ca_windows=tail_ca,
                 device_id=1,  # Use GPU 1 for forward processing
@@ -732,7 +829,8 @@ def Registration_v3(configPath='./configs/config.toml', parallel=True):
                 downsampleZ=downsampleZ,
                 downsampleXY=downsampleXY,
                 batch_size=batch_size,  # Batch size for processing
-                reference_chunk=reference_chunk  # Reference chunk size
+                reference_chunk=reference_chunk,  # Reference chunk size
+                motion_init=motion_end
             )
         )
 
@@ -791,7 +889,7 @@ def ReliableAnalysis(
     
     # Count total number of frames from membrane channel directory
     frames = sorted(os.listdir(mem_dir))
-    T = len(frames)
+    T = config['MetaData']['frames']
     
     # Define correlation function based on channel configuration
     def compute_cor_fn(mem, ca):
@@ -830,6 +928,7 @@ def ReliableAnalysis(
         ca_dir=ca_dir,
         ref_dir=ref_dir,
         out_dir=out_dir,
+        frames=config['frames']['frames'],
         config=config['ReliableAnalysis'],
         compute_cor_fn=compute_cor_fn,
         configPath=configPath,
@@ -912,9 +1011,8 @@ def create_downsample_dataset_v3(
     os.makedirs(mem_out_dir, exist_ok=True)
     os.makedirs(cal_out_dir, exist_ok=True)
     os.makedirs(mask_out_dir, exist_ok=True)
-
     # ---------------- time indices ----------------
-    time_index = np.arange(0, total_frames, ds_T)
+    time_index = config['frames']['frames'][::ds_T]
     T_ds = len(time_index)
     if verbose:
         print(f"[INFO] Total frames after T-downsample: {T_ds}")
@@ -1063,9 +1161,10 @@ def build_chunks(start_frame, end_frame, window_size, direction):
 
     if direction == 'forward':
         frames = list(range(start_frame, end_frame))
-    else:
+    elif direction == 'backward':
         frames = list(range(start_frame - 1, end_frame - 1, -1))
-
+    else:
+        raise ValueError("direction must be 'forward' or 'backward'")
     chunks = []
     i = 0
     N = len(frames)
@@ -1087,6 +1186,7 @@ def build_chunks(start_frame, end_frame, window_size, direction):
 
 def process_directional_chunks(
     direction,
+    frame_list,
     start_frame,
     end_frame,
     init_mem_windows,
@@ -1108,6 +1208,7 @@ def process_directional_chunks(
     downsampleZ,
     downsampleXY,
     batch_size=50,
+    motion_init=None
 ):
     """
     Process frames in chunks in a specified direction (forward or backward) with batch processing and 
@@ -1178,9 +1279,7 @@ def process_directional_chunks(
     )
 
     for frames in chunks:
-        frames = sorted(frames)
-        print(f"[{direction}] Processing chunk {frames[0]}~{frames[-1]} (n={len(frames)})")
-
+        print(f"[{direction}] Processing chunk {frame_list[frames[0]]}~{frame_list[frames[-1]]} (n={len(frames)})")
         # -------------------------------
         # Compute reference once per chunk
         # -------------------------------
@@ -1193,17 +1292,24 @@ def process_directional_chunks(
         ref_windows_ca=[]
         
         if save_ref:
-            IO.write_volume_as_ome_tiff(
-                ref_img.copy(), out_ref, 'ref',
-                f'{frames[0]}~{frames[-1]}', configPath
-            )
+            if direction == 'forward':
+                IO.write_volume_as_ome_tiff(
+                    ref_img.copy(), out_ref, 'ref',
+                    f'{frame_list[frames[0]]}~{frame_list[frames[-1]]}', configPath
+                )
+            else:
+                IO.write_volume_as_ome_tiff(
+                    ref_img.copy(), out_ref, 'ref',
+                    f'{frame_list[frames[-1]]}~{frame_list[frames[0]]}', configPath
+                )
 
         # -------------------------------
         # Process in batches
         # -------------------------------
         num_frames = len(frames)
+        
         for i in range(0, num_frames, batch_size):
-            batch_frames = frames[i:i + batch_size]
+            batch_frames = [frame_list[i] for i in frames[i:i + batch_size]]
             print(f"    batch {batch_frames[0]}~{batch_frames[-1]} (n={len(batch_frames)})")
 
             # Read frames
@@ -1215,17 +1321,16 @@ def process_directional_chunks(
                 movingFilePath, batch_frames, downsampleZ,
                 channel=0, xy_down=downsampleXY, verbose=False
             ))
-
             # Registration
-            if Dim == 3:
+            if Dim == 3 and len(downsampleZ) > 1:
                 mem_reg, ca_reg, _, _, motion = registration.wbi_registration_3d(
-                    mem_batch, ca_batch, configPath, ref_img, frame=batch_frames[0]
+                    mem_batch, ca_batch, configPath, ref_img, frame=batch_frames, direction=direction,motion_init=motion_init
                 )
             else:
                 mem_reg, ca_reg, _, _, motion = registration.wbi_registration_2d(
-                    mem_batch, ca_batch, configPath, ref_img, frame=batch_frames[0]
+                    mem_batch, ca_batch, configPath, ref_img, frame=batch_frames, direction=direction,motion_init=motion_init
                 )
-
+            motion_init=motion[-1]
             # Save batch results immediately
             for k, fid in enumerate(batch_frames):
                 IO.write_volume_as_ome_tiff(
@@ -1241,14 +1346,15 @@ def process_directional_chunks(
                 # -------------------------------
                 # Update rolling reference window
                 # -------------------------------
-                if direction == 'forward':
-                    ref_windows_mem.append(mem_reg[k])
-                    ref_windows_ca.append(ca_reg[k])
-                else:  # backward
-                    if len(ref_windows_mem) < reference_chunk:
-                        ref_windows_mem.append(mem_reg[k])
-                        ref_windows_ca.append(ca_reg[k])
-
+                # if direction == 'forward':
+                ref_windows_mem.append(mem_reg[k])
+                ref_windows_ca.append(ca_reg[k])
+                # elif direction == 'backward':  # backward
+                #     if len(ref_windows_mem) < reference_chunk:
+                #         ref_windows_mem.append(mem_reg[k])
+                #         ref_windows_ca.append(ca_reg[k])
+                # else:
+                #     raise ValueError("direction must be 'forward' or 'backward'")
             # Free batch memory
             del mem_batch, ca_batch, mem_reg, ca_reg, motion
             cp.get_default_memory_pool().free_all_blocks()
