@@ -286,6 +286,7 @@ def ComputMask(
                 ca_dir,
                 ref_dir,
                 out_dir,
+                dual_channel,
                 frames,
                 config,
                 compute_cor_fn,
@@ -348,8 +349,10 @@ def ComputMask(
         
         # Read registered images
         mem_i = IO.read_reg_tiff(mem_dir, i, 1)  # Channel 1: membrane
-        ca_i = IO.read_reg_tiff(ca_dir, i, 0)    # Channel 0: calcium
-        
+        if dual_channel:
+            ca_i = IO.read_reg_tiff(ca_dir, i, 0)    # Channel 0: calcium
+        else:
+            ca_i = np.zeros_like(mem_i)
         # Compute correlation map
         cor_i = compute_cor_fn(mem_i, ca_i)
         

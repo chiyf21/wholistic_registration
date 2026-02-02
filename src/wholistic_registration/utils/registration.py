@@ -33,7 +33,7 @@ def transform(image,k=1,method="raw"):
         return k*np.log10(1+image)
     else:
         raise ValueError(f"Unknown method to process the image:{method}")
-def wbi_registration_2d(moving_membrane_image,moving_Ca_image,config_file,reference_image=None,motion_init=None,verbose=True,frame=None,direction='forward'):
+def wbi_registration_2d(moving_membrane_image,config_file,reference_image=None,motion_init=None,verbose=True,frame=None,direction='forward',moving_Ca_image=None):
 
     '''Load the config file'''
     config=toml.load(config_file)
@@ -168,7 +168,7 @@ def wbi_registration_2d(moving_membrane_image,moving_Ca_image,config_file,refere
     motion_out = np.asarray(motions)
     return mem_out, ca_out, dat_ref, errors, motion_out
 
-def wbi_registration_3d(moving_membrane_image,moving_Ca_image,config_file,reference_image=None,motion_init=None,verbose=True,frame=None,direction='forward'):
+def wbi_registration_3d(moving_membrane_image,config_file,reference_image=None,motion_init=None,verbose=True,frame=None,direction='forward',moving_Ca_image=None):
     '''Load the config file'''
     config=toml.load(config_file)
 
@@ -188,7 +188,10 @@ def wbi_registration_3d(moving_membrane_image,moving_Ca_image,config_file,refere
 
     #If to use two channel data
     channels=config["channels"]
-    if channels["dual_channel"] and  refer["pick_reference_auto"]:
+    if channels['dual_channel'] and moving_Ca_image is None:
+        raise ValueError("[ERROR] Calcium image stack shouldn't be empty")
+
+    if channels["dual_channel"] and  refer["pick_reference_auto"] and channels['k']!=0:
         # get the corresponding planes in Ca channel
         Ca_data_reshape=np.reshape(moving_Ca_image, (len(frames), -1))
         Ca_average=np.mean(Ca_data_reshape[indsort,:],axis=0)

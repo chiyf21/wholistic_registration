@@ -520,10 +520,11 @@ def Registration_v3(configPath='./configs/config.toml', parallel=True):
     # basic params
     output_root = config['file_path']['registrated_path']
     movingFilePath = config['file_path']['input_path']
-
+    
     # get basic meta info
     Dim = config['MetaData']['Dim']
     total_frames = int(config['MetaData']['frames'])
+    dual_channel=config['channels']['dual_channel']
 
     # frames to process
     process_frames = config['frames']['frames']
@@ -551,7 +552,8 @@ def Registration_v3(configPath='./configs/config.toml', parallel=True):
     # prepare output directories (one folder per channel)
     print("[INFO]Preparing output directories...")
     out_mem = os.path.join(output_root, "membrane")
-    out_ca  = os.path.join(output_root, "calcium")
+    if dual_channel:
+        out_ca  = os.path.join(output_root, "calcium")
     out_ref = os.path.join(output_root, "reference")
     out_mot = os.path.join(output_root, "motion")
 
@@ -597,15 +599,17 @@ def Registration_v3(configPath='./configs/config.toml', parallel=True):
 
     # load all of the frames to the memory is so memory-comsuming, so we downsample the frames
     mem_mid_downsample = IO.readND2Frame(movingFilePath, [process_frames[i] for i in list(range(mid_start, mid_end, mid_stride))], downsampleZ, channel=1, xy_down=downsampleXY, verbose=False)
-    ca_mid_downsample = IO.readND2Frame(movingFilePath, [process_frames[i] for i in list(range(mid_start, mid_end, mid_stride))], downsampleZ, channel=0, xy_down=downsampleXY, verbose=False)
+    if dual_channel:
+        ca_mid_downsample = IO.readND2Frame(movingFilePath, [process_frames[i] for i in list(range(mid_start, mid_end, mid_stride))], downsampleZ, channel=0, xy_down=downsampleXY, verbose=False)
     print(f"[INFO]Loaded middle block frames {process_frames[frames_mid[0]]} to {process_frames[frames_mid[-1]]} with frames downsample {frame_downsample} ({mid_window_size} minutes)")
 
     # Remove singleton dimensions
     mem_mid_downsample = np.squeeze(mem_mid_downsample)
-    ca_mid_downsample = np.squeeze(ca_mid_downsample)
+    if dual_channel:
+        ca_mid_downsample = np.squeeze(ca_mid_downsample)
     
     # Compute initial reference image from middle block
-    ref_img = reference.compute_reference_from_block(mem_mid_downsample, ca_mid_downsample, config)
+    ref_img = reference.compute_reference_from_block(mem_mid_downsample, config, ca_mid_downsample)
     IO.write_volume_as_ome_tiff(
         ref_img, out_ref, 'ref',f"{process_frames[frames_mid[0]]}_{process_frames[frames_mid[-1]]}", configPath
     )
@@ -638,20 +642,22 @@ def Registration_v3(configPath='./configs/config.toml', parallel=True):
             movingFilePath, batch_frames, downsampleZ,
             channel=1, xy_down=downsampleXY, verbose=False
         )
-        ca_batch = IO.readND2Frame(
-            movingFilePath, batch_frames, downsampleZ,
-            channel=0, xy_down=downsampleXY, verbose=False
-        )
         mem_batch = np.squeeze(mem_batch)
-        ca_batch  = np.squeeze(ca_batch)
+
+        if dual_channel:
+            ca_batch = IO.readND2Frame(
+                movingFilePath, batch_frames, downsampleZ,
+                channel=0, xy_down=downsampleXY, verbose=False
+            )
+            ca_batch  = np.squeeze(ca_batch)
 
         if Dim == 3  and len(downsampleZ) > 1:
             mem_reg, ca_reg, _, _, motion = registration.wbi_registration_3d(
-                mem_batch, ca_batch, configPath, ref_img, frame=batch_frames
+                mem_batch, configPath, ref_img, frame=batch_frames, moving_Ca_image= ca_batch
             )
         else:
             mem_reg, ca_reg, _, _, motion = registration.wbi_registration_2d(
-                mem_batch, ca_batch, configPath, ref_img, frame=batch_frames
+                mem_batch, configPath, ref_img, frame=batch_frames, moving_Ca_image= ca_batch
             )
         if i==0:
             motion_start = motion[0].copy()
@@ -662,9 +668,10 @@ def Registration_v3(configPath='./configs/config.toml', parallel=True):
             IO.write_volume_as_ome_tiff(
                 mem_reg[k], out_mem, channel_index_map['membrane'], fid, configPath
             )
-            IO.write_volume_as_ome_tiff(
-                ca_reg[k], out_ca, channel_index_map['calcium'], fid, configPath
-            )
+            if dual_channel:
+                IO.write_volume_as_ome_tiff(
+                    ca_reg[k], out_ca, channel_index_map['calcium'], fid, configPath
+                )
 
             if save_motion:
                 with h5py.File(
@@ -678,11 +685,13 @@ def Registration_v3(configPath='./configs/config.toml', parallel=True):
             for k in range(len(mem_reg)):
                 if len(head_mem) < reference_chunk:
                     head_mem.append(mem_reg[k])
-                    head_ca.append(ca_reg[k])
+                    if dual_channel:
+                        head_ca.append(ca_reg[k])
 
         for k in range(len(mem_reg)):
             tail_mem.append(mem_reg[k])
-            tail_ca.append(ca_reg[k])
+            if dual_channel:
+                tail_ca.append(ca_reg[k])
 
         del mem_batch, ca_batch, mem_reg, ca_reg, motion
 
@@ -890,7 +899,7 @@ def ReliableAnalysis(
     # Count total number of frames from membrane channel directory
     frames = sorted(os.listdir(mem_dir))
     T = config['MetaData']['frames']
-    
+    dual_channel = config['channels']['dual_channel']
     # Define correlation function based on channel configuration
     def compute_cor_fn(mem, ca):
         """
@@ -928,6 +937,7 @@ def ReliableAnalysis(
         ca_dir=ca_dir,
         ref_dir=ref_dir,
         out_dir=out_dir,
+        dual_channel=dual_channel,
         frames=config['frames']['frames'],
         config=config['ReliableAnalysis'],
         compute_cor_fn=compute_cor_fn,
@@ -991,7 +1001,7 @@ def create_downsample_dataset_v3(
     reg_path  = config['file_path']['registrated_path']
     mask_path = config['file_path']['mask_path']
     total_frames = config['MetaData']['frames']
-
+    dual_channel = config['channels']['dual_channel']
     base_dsXY = config['downsample']['downsampleXY']
     base_dsZ  = config['downsample']['downsampleZ']
     if base_dsZ == -1:
@@ -1284,7 +1294,7 @@ def process_directional_chunks(
         # Compute reference once per chunk
         # -------------------------------
         ref_img = reference.compute_reference_from_block(
-            list(ref_windows_mem), list(ref_windows_ca), config
+            list(ref_windows_mem), config, list(ref_windows_ca)
         )
 
         #renew the windows:
@@ -1307,7 +1317,7 @@ def process_directional_chunks(
         # Process in batches
         # -------------------------------
         num_frames = len(frames)
-        
+        dual_channel = config['channels']['dual_channel']
         for i in range(0, num_frames, batch_size):
             batch_frames = [frame_list[i] for i in frames[i:i + batch_size]]
             print(f"    batch {batch_frames[0]}~{batch_frames[-1]} (n={len(batch_frames)})")
@@ -1317,18 +1327,19 @@ def process_directional_chunks(
                 movingFilePath, batch_frames, downsampleZ,
                 channel=1, xy_down=downsampleXY, verbose=False
             ))
-            ca_batch  = np.squeeze(IO.readND2Frame(
-                movingFilePath, batch_frames, downsampleZ,
-                channel=0, xy_down=downsampleXY, verbose=False
-            ))
+            if dual_channel:
+                ca_batch  = np.squeeze(IO.readND2Frame(
+                    movingFilePath, batch_frames, downsampleZ,
+                    channel=0, xy_down=downsampleXY, verbose=False
+                ))
             # Registration
             if Dim == 3 and len(downsampleZ) > 1:
                 mem_reg, ca_reg, _, _, motion = registration.wbi_registration_3d(
-                    mem_batch, ca_batch, configPath, ref_img, frame=batch_frames, direction=direction,motion_init=motion_init
+                    mem_batch, configPath, ref_img, frame=batch_frames, direction=direction,motion_init=motion_init, moving_Ca_image=ca_batch
                 )
             else:
                 mem_reg, ca_reg, _, _, motion = registration.wbi_registration_2d(
-                    mem_batch, ca_batch, configPath, ref_img, frame=batch_frames, direction=direction,motion_init=motion_init
+                    mem_batch, configPath, ref_img, frame=batch_frames, direction=direction,motion_init=motion_init, moving_Ca_image=ca_batch
                 )
             motion_init=motion[-1]
             # Save batch results immediately
@@ -1336,9 +1347,10 @@ def process_directional_chunks(
                 IO.write_volume_as_ome_tiff(
                     mem_reg[k], out_mem, channel_index_map['membrane'], fid, configPath
                 )
-                IO.write_volume_as_ome_tiff(
-                    ca_reg[k], out_ca, channel_index_map['calcium'], fid, configPath
-                )
+                if dual_channel:
+                    IO.write_volume_as_ome_tiff(
+                        ca_reg[k], out_ca, channel_index_map['calcium'], fid, configPath
+                    )
                 if save_motion:
                     with h5py.File(os.path.join(out_mot, f"motion_{fid:06d}.h5"), 'w') as hf:
                         hf.create_dataset('motion', data=motion[k], compression='gzip')
@@ -1348,7 +1360,8 @@ def process_directional_chunks(
                 # -------------------------------
                 # if direction == 'forward':
                 ref_windows_mem.append(mem_reg[k])
-                ref_windows_ca.append(ca_reg[k])
+                if dual_channel:
+                    ref_windows_ca.append(ca_reg[k])
                 # elif direction == 'backward':  # backward
                 #     if len(ref_windows_mem) < reference_chunk:
                 #         ref_windows_mem.append(mem_reg[k])
