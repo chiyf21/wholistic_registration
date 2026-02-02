@@ -2,6 +2,15 @@
 
 ### Priorities
 
+
+260130
+- Check single channel works
+- Check timewindow option words
+- Change downsample function to be more efficient - modularize - downsample each channel independently
+- Run reliability mask on f2013 - check the mask for false positives and false negatives?
+- Make Fiji macro (I can do this) to load data as multiple color channels
+
+
 Things to check (top priority):
 - making sure it's CPU/GPU compatible 
 - make sure the pipeline can handle single planes?
@@ -30,11 +39,13 @@ Second priority:
 # Running the pipeline
 
 ### Running on Janelia Cluster
+https://hhmi.atlassian.net/wiki/spaces/SCS/pages/152469552/Janelia+Compute+Cluster#GPU-Compute-Cluster
 
 Request GPU node
 ```
-bsub -J demo_job -n 2 -gpu "num=2" -q gpu_a100 -Is -W 48:00 /bin/bash
+bsub -J demo_job -n 10 -gpu "num=1" -q gpu_a100 -Is -W 12:00 /bin/bash
 ```
+
 
 Activate environment
 ```
@@ -45,10 +56,32 @@ Launch script
 
 
 ```
-python /python_packages/wholistic_registration/src/wholistic_registration> python pipeline_vmsr.py
+python /groups/ahrens/home/ruttenv/python_packages/wholistic_registration/src/wholistic_registration/pipeline_vmsr.py
 ```
 
+Queue	RAM per slot	Slots per GPU	Total RAM per GPU
+gpu_tesla_large	30 GB	12	360 GB
+gpu_rtx	18 GB	5	90 GB
+gpu_tesla	15 GB	5	75 GB
+gpu_any / gpu_short	15 GB	2	30 GB
 
+
+1. bjobs
+2. jobs -l <jobid> # check which GPU you are using
+3. https://lsf-rtm.int.janelia.org/cacti/plugins/grid/grid_bjobs.php?action=viewlist&reset=1&clusterid=1&job_user=ruettenv&status=RUNNING&page=1
+
+
+### Notes on memory requirements
+- GPU load mostly maxed out when computing the references
+- CPU load maxed out when loading an entire chunk
+
+
+```
+nvidia-smi && echo "---" && free -h && echo "---" && echo "CPUs: $(nproc)"
+```
+
+To monitor VRAM usage in real-time while your job runs:
+```watch -n 1 nvidia-smi```
 
 ---
 
