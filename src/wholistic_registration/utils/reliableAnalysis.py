@@ -291,7 +291,6 @@ def ComputMask(
                 config,
                 compute_cor_fn,
                 configPath,
-                T,
 ):
     """
     Computes spatial, temporal, and accumulative reliability masks.
@@ -318,8 +317,6 @@ def ComputMask(
         Function to compute correlation map from membrane and calcium channels
     configPath : str
         Path to the main configuration file
-    T : int
-        Total number of frames to process
     downsampleXY : int, optional
         Downsampling factor for XY dimensions (default: 1)
     downsampleT : int, optional
@@ -345,7 +342,7 @@ def ComputMask(
     # Process each frame
     for i in frames:
         if i % 100 == 0:
-            print(f"Processed {i}/{T} frames")
+            print(f"Processed {i}/{len(frames)} frames")
         
         # Read registered images
         mem_i = IO.read_reg_tiff(mem_dir, i, 1)  # Channel 1: membrane

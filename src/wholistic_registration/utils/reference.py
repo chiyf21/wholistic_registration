@@ -97,7 +97,7 @@ def compute_reference_from_block(mem_block, config,ca_block=None):
     k=config['channels']['k']
     function=config['channels']['function']
     dual_channels=config['channels']['dual_channel']
-    frames=max(len(mem_block)//2,50)
+    frames=min(len(mem_block)//2,50)
     mem_block = cp.asarray(mem_block)
     mem_ref, indsort = pick_initial_reference(mem_block,max_corr_frames=frames)
     if dual_channels:

@@ -549,17 +549,22 @@ def Registration_v3(configPath='./configs/config.toml', parallel=True):
             SIZE = config['MetaData']['SIZE']
             Z_full = int(SIZE[1])
             downsampleZ = list(range(Z_full))
+    elif Dim == 2:
+        downsampleZ=[0]
+    else:
+        raise ValueError("[ERROR]Invalid Dim in MetaData config.")
     # prepare output directories (one folder per channel)
     print("[INFO]Preparing output directories...")
     out_mem = os.path.join(output_root, "membrane")
-    if dual_channel:
-        out_ca  = os.path.join(output_root, "calcium")
     out_ref = os.path.join(output_root, "reference")
     out_mot = os.path.join(output_root, "motion")
 
     os.makedirs(out_mem, exist_ok=True)
-    os.makedirs(out_ca, exist_ok=True)
-
+    if dual_channel:
+        out_ca  = os.path.join(output_root, "calcium")
+        os.makedirs(out_ca, exist_ok=True)
+    else:
+        out_ca = None
     save_ref = bool(config['save_config']['save_ref'])
     save_motion = bool(config['save_config']['save_motion'])
 
@@ -599,14 +604,15 @@ def Registration_v3(configPath='./configs/config.toml', parallel=True):
 
     # load all of the frames to the memory is so memory-comsuming, so we downsample the frames
     mem_mid_downsample = IO.readND2Frame(movingFilePath, [process_frames[i] for i in list(range(mid_start, mid_end, mid_stride))], downsampleZ, channel=1, xy_down=downsampleXY, verbose=False)
-    if dual_channel:
-        ca_mid_downsample = IO.readND2Frame(movingFilePath, [process_frames[i] for i in list(range(mid_start, mid_end, mid_stride))], downsampleZ, channel=0, xy_down=downsampleXY, verbose=False)
-    print(f"[INFO]Loaded middle block frames {process_frames[frames_mid[0]]} to {process_frames[frames_mid[-1]]} with frames downsample {frame_downsample} ({mid_window_size} minutes)")
-
     # Remove singleton dimensions
     mem_mid_downsample = np.squeeze(mem_mid_downsample)
+
     if dual_channel:
+        ca_mid_downsample = IO.readND2Frame(movingFilePath, [process_frames[i] for i in list(range(mid_start, mid_end, mid_stride))], downsampleZ, channel=0, xy_down=downsampleXY, verbose=False)
         ca_mid_downsample = np.squeeze(ca_mid_downsample)
+    else:
+        ca_mid_downsample = None
+    print(f"[INFO]Loaded middle block frames {process_frames[frames_mid[0]]} to {process_frames[frames_mid[-1]]} with frames downsample {frame_downsample} ({mid_window_size} minutes)")
     
     # Compute initial reference image from middle block
     ref_img = reference.compute_reference_from_block(mem_mid_downsample, config, ca_mid_downsample)
@@ -650,7 +656,8 @@ def Registration_v3(configPath='./configs/config.toml', parallel=True):
                 channel=0, xy_down=downsampleXY, verbose=False
             )
             ca_batch  = np.squeeze(ca_batch)
-
+        else:
+            ca_batch = None
         if Dim == 3  and len(downsampleZ) > 1:
             mem_reg, ca_reg, _, _, motion = registration.wbi_registration_3d(
                 mem_batch, configPath, ref_img, frame=batch_frames, moving_Ca_image= ca_batch
@@ -941,8 +948,7 @@ def ReliableAnalysis(
         frames=config['frames']['frames'],
         config=config['ReliableAnalysis'],
         compute_cor_fn=compute_cor_fn,
-        configPath=configPath,
-        T=T,
+        configPath=configPath
     )
 
 ####################################################################################################################
@@ -1004,8 +1010,12 @@ def create_downsample_dataset_v3(
     dual_channel = config['channels']['dual_channel']
     base_dsXY = config['downsample']['downsampleXY']
     base_dsZ  = config['downsample']['downsampleZ']
-    if base_dsZ == -1:
+    if config['MetaData']['Dim'] == 3:
         base_dsZ = list(range(config['MetaData']['SIZE'][2]))
+    elif config['MetaData']['Dim'] == 2:
+        base_dsZ = [0]
+    else:
+        raise ValueError(f"[ERROR] Invalid Dim value in config. Must be 2 or 3. Dim={config['MetaData']['Dim']}")
 
     raw_dsXY = base_dsXY * ds_XY
 
@@ -1129,10 +1139,113 @@ def create_downsample_dataset_v3(
 
     if verbose:
         print("[ALL DONE] Downsampled dataset (v3) created successfully.")
+def create_downsample_dataset_v4(
+    configPath='./configs/config.toml',
+    downsampleFilePath='./registrated_downsample',
+    ds_XY=1,
+    ds_T=1,
+    n_workers=4,
+    verbose=True
+):
+    """
+    Create a downsampled dataset (v3) from registered and raw ND2 data.
 
+    This version:
+    - Uses lazy dask arrays for TIFF series to reduce peak memory usage
+    - Computes per block to avoid loading all frames at once
+    - Outputs membrane, calcium, and mask volumes
+    - Maintains XY and time downsampling
+
+    Parameters
+    ----------
+    configPath : str
+        Path to TOML configuration file (must contain input_path, registrated_path, mask_path, and metadata).
+    downsampleFilePath : str
+        Output directory for downsampled dataset.
+    ds_XY : int
+        XY downsampling factor applied on top of base downsample in config.
+    ds_T : int
+        Temporal downsampling factor (frames skipped along time axis).
+    block_size : int
+        Number of frames to process per block to reduce memory consumption.
+    verbose : bool
+        Whether to print progress information.
+
+    Outputs
+    -------
+    downsampleFilePath/
+        membrane/    : raw_membrane + registered_membrane + reference
+        calcium/     : raw_calcium + registered_calcium
+        mask/        : reference + registered_membrane + mask
+
+    Usage
+    -----
+    create_downsample_dataset_v3(
+        configPath='./configs/config.toml',
+        downsampleFilePath='./registrated_downsample',
+        ds_XY=4, ds_T=2, block_size=50, verbose=True
+    )
+    """
+    import shutil
+    # ---------------- load config ----------------
+    config = toml.load(configPath)
+    raw_path  = config['file_path']['input_path']
+    reg_path  = config['file_path']['registrated_path']
+    mask_path = config['file_path']['mask_path']
+    dual_channel = config['channels']['dual_channel']
+    base_dsXY = config['downsample']['downsampleXY']
+    base_dsZ  = config['downsample']['downsampleZ']
+    frames = config['frames']['frames']
+    if config['MetaData']['Dim'] == 3:
+        base_dsZ = list(range(config['MetaData']['SIZE'][2]))
+    elif config['MetaData']['Dim'] == 2:
+        base_dsZ = [0]
+    else:
+        raise ValueError(f"[ERROR] Invalid Dim value in config. Must be 2 or 3. Dim={config['MetaData']['Dim']}")
+    dual_channel = config['channels']['dual_channel']
+
+    raw_dsXY = base_dsXY * ds_XY
+
+    from utils.reliableAnalysis import build_reference_index
+
+    reg_mem_path = os.path.join(reg_path, "membrane")
+    reg_cal_path = os.path.join(reg_path, "calcium")
+    reg_ref_path = os.path.join(reg_path, "reference")
+    ref_map, _ = build_reference_index(reg_ref_path)
+
+    if os.path.exists(downsampleFilePath):
+        if verbose:
+            print(f"[INFO] Removing existing directory: {downsampleFilePath}")
+        shutil.rmtree(downsampleFilePath)
+
+    mem_out_dir  = os.path.join(downsampleFilePath, "membrane")
+    mask_out_dir = os.path.join(downsampleFilePath, "mask")
+    raw_mem_out_dir  = os.path.join(downsampleFilePath, "raw_membrane")
+    ref_out_dir  = os.path.join(downsampleFilePath, "reference")
+    os.makedirs(mem_out_dir, exist_ok=True)
+    os.makedirs(ref_out_dir, exist_ok=True)
+    os.makedirs(mask_out_dir, exist_ok=True)
+    os.makedirs(raw_mem_out_dir, exist_ok=True)
+    # ---------------- build lazy dask arrays ----------------
+
+    IO.downsample_tifs_dask(reg_ref_path,ref_out_dir,ds_XY,ds_T,n_workers,verbose)
+    IO.downsample_tifs_dask(reg_mem_path,mem_out_dir,ds_XY,ds_T,n_workers,verbose)
+    IO.downsample_tifs_dask(mask_path,mask_out_dir,ds_XY,ds_T,n_workers,verbose)
+    IO.downsample_nd2_to_tiff_folder(raw_path,raw_mem_out_dir,raw_dsXY,ds_T,frames,base_dsZ,1,n_workers=n_workers,verbose=verbose)
+
+    if dual_channel:
+        cal_out_dir  = os.path.join(downsampleFilePath, "calcium")
+        raw_cal_out_dir  = os.path.join(downsampleFilePath, "raw_calcium")
+        os.makedirs(cal_out_dir, exist_ok=True)
+        os.makedirs(raw_cal_out_dir, exist_ok=True)
+        IO.downsample_tifs_dask(reg_cal_path,cal_out_dir,ds_XY,ds_T,n_workers,verbose=verbose  )
+        IO.downsample_nd2_to_tiff_folder(raw_path,raw_cal_out_dir,raw_dsXY,ds_T,frames,base_dsZ,0,n_workers=n_workers,verbose=verbose)
 ####################################################################################################################
 ####################################################################################################################
 ## helper functions
+
+
+
 
 def write_volume_as_ome_tiff(volume, out_dir, ch_idx, frame_idx,configPath, spacing_x=1.0, spacing_y=1.0):
     """
@@ -1332,6 +1445,8 @@ def process_directional_chunks(
                     movingFilePath, batch_frames, downsampleZ,
                     channel=0, xy_down=downsampleXY, verbose=False
                 ))
+            else:
+                ca_batch = None
             # Registration
             if Dim == 3 and len(downsampleZ) > 1:
                 mem_reg, ca_reg, _, _, motion = registration.wbi_registration_3d(

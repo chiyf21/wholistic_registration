@@ -37,12 +37,13 @@ def wbi_registration_2d(moving_membrane_image,config_file,reference_image=None,m
 
     '''Load the config file'''
     config=toml.load(config_file)
-
-
     '''Get frames'''
+    if len(moving_membrane_image.shape)==2:
+        moving_membrane_image=np.expand_dims(moving_membrane_image,axis=0)
+        if moving_Ca_image is not None:
+            moving_Ca_image=np.expand_dims(moving_Ca_image,axis=0)
     nimg, Ly, Lx = moving_membrane_image.shape
     frames=range(0,nimg)
-
 
     '''Get reference image'''
     #if we pick reference image from moving_image
@@ -54,8 +55,10 @@ def wbi_registration_2d(moving_membrane_image,config_file,reference_image=None,m
 
     #If to use two channel data
     channels=config["channels"]
-    if channels["dual_channel"] and  refer["pick_reference_auto"]:
-        # get the corresponding planes in Ca channel
+    if channels['dual_channel'] and moving_Ca_image is None:
+        raise ValueError("[ERROR] Calcium image stack shouldn't be empty")
+
+    if channels["dual_channel"] and  refer["pick_reference_auto"] and channels['k']!=0:        # get the corresponding planes in Ca channel
         Ca_data_reshape=np.reshape(moving_Ca_image, (len(frames), -1))
         Ca_average=np.mean(Ca_data_reshape[indsort,:],axis=0)
         Ca_ref_1plane=np.reshape(Ca_average,moving_membrane_image.shape[1:])
@@ -171,12 +174,22 @@ def wbi_registration_2d(moving_membrane_image,config_file,reference_image=None,m
 def wbi_registration_3d(moving_membrane_image,config_file,reference_image=None,motion_init=None,verbose=True,frame=None,direction='forward',moving_Ca_image=None):
     '''Load the config file'''
     config=toml.load(config_file)
-
-
-    '''Get frames'''
+    if len(moving_membrane_image.shape)==3:
+        moving_membrane_image=np.expand_dims(moving_membrane_image,axis=0)
+        if moving_Ca_image is not None:
+            moving_Ca_image=np.expand_dims(moving_Ca_image,axis=0)
     nimg, Lz, Ly, Lx = moving_membrane_image.shape
     frames=range(0,nimg)
 
+    '''Get frames'''
+    if len(moving_membrane_image.shape)==4:
+        nimg, Lz, Ly, Lx = moving_membrane_image.shape
+    elif len(moving_membrane_image.shape)==3:
+        Lz, Ly, Lx = moving_membrane_image.shape
+        nimg=1
+    else:
+        raise ValueError("moving_membrane_image must be 3D or 4D array")
+    frames=range(0,nimg)
 
     '''Get reference image'''
     #if we pick reference image from moving_image
