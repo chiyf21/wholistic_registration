@@ -51,23 +51,8 @@ def write_multichannel_volume_as_ome_tiff(vol3d_list, out_dir, frame_idx, config
         metadata=metadata,
         verbose=False
     )
-def gradient_amplitude(volume: cp.ndarray) -> cp.ndarray:
-    """
-    Compute gradient amplitude of a 2D/3D image.
-    volume: shape = (X,Y) or (X,Y,Z)
-    """
-    if volume.ndim == 2:  # 2D
-        gx = cupy_ndimage.sobel(volume, axis=0)
-        gy = cupy_ndimage.sobel(volume, axis=1)
-        return cp.sqrt(gx**2 + gy**2)
-    elif volume.ndim == 3:  # 3D
-        gx = cupy_ndimage.sobel(volume, axis=0)
-        gy = cupy_ndimage.sobel(volume, axis=1)
-        gz = cupy_ndimage.sobel(volume, axis=2)
-        return cp.sqrt(gx**2 + gy**2 + gz**2)
-    else:
-        raise ValueError("Only 2D or 3D data are supported")
 
+#pre version
 def local_ssim_difference(I_ref,I_mov,win_size=11,use_3d=False,sigma_3d=1.5):
     """
     Compute local SSIM difference map (0~1) between two images.
@@ -160,12 +145,14 @@ def local_ssim_difference(I_ref,I_mov,win_size=11,use_3d=False,sigma_3d=1.5):
 
         return np.clip(D.astype(np.float32), 0, 1)
 
+#pre version
 def local_mind_difference(
     I_ref,
     I_mov,
-    patch_sigma=3,
+    patch_sigma=1.5,
     offset_radius=5,
-    structure_thresh=0.6,
+    structure_tau=0.6,
+    structure_beta=0.05,
     eps=1e-6,
 ):
     """
@@ -212,22 +199,64 @@ def local_mind_difference(
         V = cp.mean(D, axis=0) + eps
         MIND = cp.exp(-D / V[None])
         return MIND
-
+    def _soft_structure_weight(S, tau, beta):
+        """
+        Sigmoid soft structure mask
+        """
+        return 1.0 / (1.0 + cp.exp(-(S - tau) / beta))
+    
     def _mind_diff_2d(Ir, Im):
         M_ref = _mind_descriptor_2d(Ir)
+        import tifffile
+        tifffile.imwrite(f"/home/cyf/wbi/Virginia/registrated_data/f2013/M_ref.tif", M_ref.get())
         M_mov = _mind_descriptor_2d(Im)
+        
+        diff = cp.abs(cp.mean(M_ref - M_mov, axis=0))        
+        tifffile.imwrite(f"/home/cyf/wbi/Virginia/registrated_data/f2013/diff_raw.tif", diff.get())
+        ###############################################
+        # num = cp.linalg.norm(M_ref - M_mov, axis=0)
+        # den = cp.linalg.norm(M_mov, axis=0) + eps
+        # diff = num / den
+        # diff = cp.clip(diff, 0.0, 1.0)
+        ################################################
+        # num = cp.sum(M_ref * M_mov, axis=0)
+        # den = cp.linalg.norm(M_ref, axis=0) * cp.linalg.norm(M_mov, axis=0) + eps
+        # diff_cos = 1.0 - num / den
+        ################################################
+        # delta = cp.abs(M_ref-M_mov)
+        # mean = cp.mean(delta, axis=0)
+        # std = cp.std(delta, axis=0) + eps
+        # diff = mean/std
+        # # region aggregation
+        # diff = cupy_ndimage.gaussian_filter(diff_cos, sigma=patch_sigma)
 
-        diff = cp.mean(cp.abs(M_ref - M_mov), axis=0)
+        # structure-gated
 
-        # --------- structure mask ---------
-        structure = cp.mean(M_ref, axis=0)
-        mask = structure > structure_thresh
+        # # 保存diff为png
+        # import tifffile
+        # tifffile.imwrite("/home/cyf/wbi/Virginia/registrated_data/f2013/diff_map.tif", diff.get())
+        
+        # ---------------------------
+        # soft structure weighting
+        # ---------------------------
+        structure_mov = cp.mean(M_mov, axis=0)
+        structure_mov = cupy_ndimage.gaussian_filter(structure_mov, sigma=patch_sigma)
+        weight_mov = _soft_structure_weight(
+            structure_mov, structure_tau, structure_beta
+        )
+        structure_ref = cp.mean(M_ref, axis=0)
+        structure_ref = cupy_ndimage.gaussian_filter(structure_ref, sigma=patch_sigma)
+        weight_ref = _soft_structure_weight(
+            structure_ref, structure_tau, structure_beta
+        )
+        weight = cp.maximum(weight_ref, weight_mov)
+        # import tifffile
+        tifffile.imwrite("/home/cyf/wbi/Virginia/registrated_data/f2013/weight_map.tif",weight.get())
+        # weight = structure > 0.1
 
-        # scale using only structured regions
-        # apply hard mask: background = 0
-        diff = diff * mask.astype(cp.float32)
-
-        return cp.clip(diff**2, 0, 1)
+        diff = diff * weight    
+        tifffile.imwrite(f"/home/cyf/wbi/Virginia/registrated_data/f2013/diff_weighted.tif", diff.get())
+        return cp.clip(diff, 0.0, 1.0)
 
     # ---------------------------
     # main
@@ -251,6 +280,183 @@ def local_mind_difference(
     else:
         raise ValueError("Only 2D or 3D images are supported")
 
+#pre version
+def local_zscore_difference(
+    I_ref,
+    I_mov,
+    sigma=1.5,
+    eps=1e-6,
+    p_mu=20,
+    p_var=40,
+    clip=(0,10)
+):
+    I_ref = I_ref.astype(np.float32)
+    I_mov = I_mov.astype(np.float32)
+
+    mu_ref = gaussian_filter(I_ref, sigma=sigma)
+    mu_mov = gaussian_filter(I_mov, sigma=sigma)
+
+    var_ref = gaussian_filter(I_ref**2, sigma=sigma) - mu_ref**2
+    var_mov = gaussian_filter(I_mov**2, sigma=sigma) - mu_mov**2
+    import tifffile
+    tifffile.imwrite("/home/cyf/wbi/Virginia/registrated_data/f2013/var_ref.tif", var_ref)
+    # import tifffile 
+    threshold_mu_ref = np.percentile(mu_ref, p_mu)
+    threshold_var_ref = np.percentile(var_ref, p_var)
+    mask_ref = (mu_ref>threshold_mu_ref) & (var_ref>threshold_var_ref)
+    # tifffile.imwrite("/home/cyf/wbi/Virginia/registrated_data/f2013/mask_ref.tif", mask_ref)
+    threshold_mu_mov = np.percentile(mu_mov, p_mu)
+    threshold_var_mov = np.percentile(var_mov, p_var)
+    mask_mov = (mu_mov>threshold_mu_mov) & (var_mov>threshold_var_mov)
+    # tifffile.imwrite("/home/cyf/wbi/Virginia/registrated_data/f2013/mask_mov.tif", mask_mov)
+    mask = mask_ref | mask_mov
+    # import tifffile 
+    # tifffile.imwrite("/home/cyf/wbi/Virginia/registrated_data/f2013/mask.tif", mask)
+    denom = np.sqrt(var_ref + var_mov) + eps
+
+    D = np.abs(mu_ref - mu_mov) / denom *mask
+    if clip is not None:
+        D = np.clip(D, clip[0], clip[1])
+    D = (D / (clip[1] - clip[0]))  # normalize to [0,1]
+    return D.astype(np.float32)
+
+# pre version
+def reliability_map(
+    I,
+    sigma=1.5,
+    eps=1e-6,
+    outlier_sigma=5.0
+):
+    I = I.astype(np.float32)
+    mu = gaussian_filter(I, sigma)
+    var = gaussian_filter(I**2, sigma) - mu**2
+    var[var < 0] = 0
+    scale = np.percentile(var, 95)
+    if scale < eps:
+        return np.zeros_like(I, dtype=np.float32)
+    R_local = var / (scale + eps)
+    R_local = np.clip(R_local, 0, 1)
+    median = np.median(I)
+    mad = np.median(np.abs(I - median))
+    robust_std = 1.4826 * mad + eps
+    z_robust = (I - median) / robust_std
+    outlier_mask = np.abs(z_robust) > outlier_sigma
+    R_local[outlier_mask] = 0.0
+    return R_local.astype(np.float32)
+def reliability_map_v2(template, sigma = 1.5, eps=1e-6):
+    """
+    Continuous reliability map based on:
+    - low gradient (structure stability)
+    - sufficient intensity
+    Output: float32 in [0,1]
+    """
+    template = cp.asarray(template, dtype=cp.float32)
+    def gradient_amplitude(volume: cp.ndarray) -> np.ndarray:
+        if isinstance(volume, np.ndarray):
+            volume = cp.asarray(volume, dtype=cp.float32)
+        if volume.ndim == 2:  # 2D
+            gy = cupy_ndimage.sobel(volume, axis=0)
+            gx = cupy_ndimage.sobel(volume, axis=1)
+            result = cp.sqrt(gx**2 + gy**2)
+        elif volume.ndim == 3:  # 3D
+            gz = cupy_ndimage.sobel(volume, axis=0)
+            gy = cupy_ndimage.sobel(volume, axis=1)
+            gx = cupy_ndimage.sobel(volume, axis=2)
+            result = cp.sqrt(gx**2 + gy**2 + gz**2)
+        else:
+            raise ValueError("only support 2D or 3D data")
+        return result
+    # gradient amplitude
+    Iamp = gradient_amplitude(template)
+    Iamp_mu = cp.median(Iamp)
+    Iamp_sigma = cp.std(Iamp) + eps
+    Iz = (Iamp - Iamp_mu) / Iamp_sigma
+    # smooth
+    Iz_sm = cupy_ndimage.gaussian_filter(Iz, sigma=sigma)
+    # Gradient reliability (low gradient = high reliability)
+    tau_g = cp.std(Iz_sm) + eps
+    R_grad = cp.exp(-(Iz_sm ** 2) / (2 * tau_g ** 2))
+    # normalize 
+    R_grad = R_grad / (cp.max(R_grad) + eps)
+    p60 = cp.percentile(template, 60)
+    p99 = cp.percentile(template, 99)
+    R_int = (template - p60) / (p99 - p60 + eps)
+    R_int = cp.clip(R_int, 0, 1)
+    R = R_grad * R_int
+    R = cupy_ndimage.gaussian_filter(R, sigma=sigma)
+    R = R / (cp.max(R) + eps)
+    if isinstance(R, np.ndarray):
+        return R
+    else:
+        return R.get()
+
+# pre version
+def photometric_align_robust(I_ref, I_mov, R, r_threshold=0.3, eps=1e-6):
+    valid = R > r_threshold
+
+    x = I_ref[valid].flatten()
+    y = I_mov[valid].flatten()
+    if len(x) < 1000:
+        x = I_ref.flatten()
+        y = I_mov.flatten()
+    a, b = np.polyfit(x, y, 1)
+    I_mov_corr = (I_mov - b) / (a + eps)
+    return I_mov_corr.astype(np.float32)
+
+def photometric_align_hist(I_ref, I_mov):
+    from skimage.exposure import match_histograms
+    return match_histograms(I_mov, I_ref).astype(np.float32)
+
+def structural_difference_map(
+    I_ref,
+    I_mov,
+    sigma_structure=4.0,
+    sigma_reliability=1.5,
+    r_threshold=0.2,
+):
+
+    I_ref = I_ref.astype(np.float32)
+    I_mov = I_mov.astype(np.float32)
+
+    R_ref = reliability_map_v2(I_ref, sigma=sigma_reliability)
+    R_mov = reliability_map_v2(I_mov, sigma=sigma_reliability)
+    R = np.minimum(R_ref, R_mov)
+    import tifffile
+    tifffile.imwrite("/home/cyf/wbi/Virginia/registrated_data/f2013/R.tif", R)
+    # I_mov_corr = photometric_align_robust(
+    #     I_ref,
+    #     I_mov,
+    #     R,
+    #     r_threshold=r_threshold
+    # )
+    I_mov_corr = photometric_align_hist(
+        I_ref,
+        I_mov
+    )
+    mu_ref = gaussian_filter(I_ref, sigma_structure)
+    mu_mov = gaussian_filter(I_mov_corr, sigma_structure)
+
+    diff = np.abs(mu_ref - mu_mov)
+
+    valid_vals = diff[R > r_threshold]
+
+    if len(valid_vals) > 100:
+        scale = np.percentile(valid_vals, 99)
+    else:
+        scale = np.percentile(diff, 99)
+    # noise_scale = np.percentile(valid_vals,70) + eps
+
+    # if noise_scale < eps:
+    #     noise_scale = eps
+    # tifffile.imwrite("/home/cyf/wbi/Virginia/registrated_data/f2013/diff.tif", diff)
+    Z = diff / scale
+    D = 1.0 - np.exp(-Z**2)
+    import tifffile
+    tifffile.imwrite("/home/cyf/wbi/Virginia/registrated_data/f2013/D.tif", D)
+
+    D_final = D * R
+
+    return D_final.astype(np.float32), D.astype(np.float32), R.astype(np.float32)
 
 def build_reference_index(ref_dir):
     """
@@ -281,16 +487,17 @@ def build_reference_index(ref_dir):
 
     return ref_map, ref_files
 
-def ComputMask(
+#pre version
+def ComputeMask(
                 mem_dir,
                 ca_dir,
                 ref_dir,
                 out_dir,
+                dual_channel,
                 frames,
                 config,
                 compute_cor_fn,
                 configPath,
-                T,
 ):
     """
     Computes spatial, temporal, and accumulative reliability masks.
@@ -317,8 +524,6 @@ def ComputMask(
         Function to compute correlation map from membrane and calcium channels
     configPath : str
         Path to the main configuration file
-    T : int
-        Total number of frames to process
     downsampleXY : int, optional
         Downsampling factor for XY dimensions (default: 1)
     downsampleT : int, optional
@@ -339,17 +544,19 @@ def ComputMask(
     os.makedirs(mask_ds_dir, exist_ok=True)
     
     # Build reference image index
-    ref_map, _ = build_reference_index(ref_dir)
+    ref_map, ref_files = build_reference_index(ref_dir)
     
     # Process each frame
     for i in frames:
         if i % 100 == 0:
-            print(f"Processed {i}/{T} frames")
+            print(f"Processed {i}/{frames[-1]} frames")
         
         # Read registered images
         mem_i = IO.read_reg_tiff(mem_dir, i, 1)  # Channel 1: membrane
-        ca_i = IO.read_reg_tiff(ca_dir, i, 0)    # Channel 0: calcium
-        
+        if dual_channel:
+            ca_i = IO.read_reg_tiff(ca_dir, i, 0)    # Channel 0: calcium
+        else:
+            ca_i = np.zeros_like(mem_i)
         # Compute correlation map
         cor_i = compute_cor_fn(mem_i, ca_i)
         
@@ -363,12 +570,9 @@ def ComputMask(
         
         # Compute reliability mask using SSIM difference
         # mask_map = local_gradient_misalignment(cor_i, ref_i)
-        mask_map = local_mind_difference(ref_i,
+        mask_map = local_zscore_difference(ref_i,
                                         cor_i,
-                                        config['patch_sigma'],
-                                        config['offset_radius'],
-                                        config['structure_thresh'],
-                                        config['eps'])
+                                        )
         if isinstance(mask_map,np.ndarray):
             # Save downsampled mask
             IO.write_multichannel_volume_as_ome_tiff(
@@ -381,6 +585,93 @@ def ComputMask(
         else:
             IO.write_multichannel_volume_as_ome_tiff(
                 volume=[mask_map.get()],      # single channel
+                out_dir=out_dir,
+                frame_idx=i,
+                configPath=configPath,
+                label='mask'
+            )
+def ComputeMask_v2(
+                mem_dir,
+                ca_dir,
+                ref_dir,
+                out_dir,
+                dual_channel,
+                frames,
+                config,
+                compute_cor_fn,
+                configPath,
+):
+    """
+    Computes spatial, temporal, and accumulative reliability masks.
+
+    For each frame:
+        1. Reads registered membrane and calcium images
+        2. Computes correlation map
+        3. Compares with reference image using SSIM
+        4. Saves resulting mask as OME-TIFF
+
+    Parameters:
+    -----------
+    mem_dir : str
+        Directory containing registered membrane channel images
+    ca_dir : str
+        Directory containing registered calcium channel images
+    ref_dir : str
+        Directory containing reference images
+    out_dir : str
+        Directory where output masks will be saved
+    config : dict
+        Configuration parameters for reliable analysis
+    compute_cor_fn : callable
+        Function to compute correlation map from membrane and calcium channels
+    configPath : str
+        Path to the main configuration file
+    downsampleXY : int, optional
+        Downsampling factor for XY dimensions (default: 1)
+    downsampleT : int, optional
+        Downsampling factor for temporal dimension (default: 1)
+
+    Returns:
+    --------
+    None
+
+    Output:
+    -------
+    Creates the following directory structure under out_dir:
+    """
+
+    # Create output directories
+    mask_ds_dir = out_dir # Downsampled masks directory
+    
+    IO.reset_dir(mask_ds_dir)
+    
+    # Build reference image index
+    ref_map, ref_files = build_reference_index(ref_dir)
+    ref_files = sorted(ref_files)  # Ensure files are processed in order
+    
+    # Process each frame
+    for i in range(len(ref_files)-1):
+        ## test
+        print(f"Compute difference between {ref_files[i]} and {ref_files[i+1]} ")
+        
+        ref_pre = tifffile.imread(os.path.join(ref_dir,ref_files[i]))
+        ref_post = tifffile.imread(os.path.join(ref_dir,ref_files[i+1]))
+
+        mask_map,_,_ = structural_difference_map(ref_pre,
+                                        ref_post,
+                                        )
+        if isinstance(mask_map,np.ndarray):
+            # Save downsampled mask
+            IO.write_multichannel_volume_as_ome_tiff(
+                volume=[ref_pre,ref_post,mask_map],      # single channel
+                out_dir=out_dir,
+                frame_idx=i,
+                configPath=configPath,
+                label='mask'
+            )
+        else:
+            IO.write_multichannel_volume_as_ome_tiff(
+                volume=[ref_pre,ref_post,mask_map.get()],      # single channel
                 out_dir=out_dir,
                 frame_idx=i,
                 configPath=configPath,

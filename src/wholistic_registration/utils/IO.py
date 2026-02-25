@@ -28,6 +28,7 @@ import dask.delayed
 from glob import glob
 import os
 import time
+import shutil
 
 def readMeta(filePath,Ifprint=True):
     """
@@ -102,7 +103,9 @@ def readMeta_new(filePath,Ifprint=True):
         multichannel = True if nchannels > 1 else False
         multiz = True if nzpix > 1 else False
         multiframe = True if nframes > 1 else False
-
+        if not multiz:
+            # (T, C, Y, X)->(T, 1, C, Y, X)
+            data_shape = (data_shape[0], 1, data_shape[1], data_shape[2], data_shape[3])
         try:
             avgdiff = ndf.experiment[0].parameters.periodDiff.avg/1000
             framerate = 1 / avgdiff
@@ -448,6 +451,231 @@ def downsample_tiff_series(tiff_folder_or_list, xy_down=4, batch_processing=Fals
                                                   final_result.shape[2], 
                                                   final_result.shape[3]//2, 
                                                   final_result.shape[4]//2))
+
+def reset_dir(path):
+    if os.path.exists(path):
+        shutil.rmtree(path)
+    os.makedirs(path)
+def downsample_tifs_dask(input_folder, output_folder, downsample_xy=4, downsample_t=1, n_workers=4,verbose=True):
+    """
+    Read TIF files, downsample, and save to new folder using Dask for parallelization.
+    
+    Parameters
+    ----------
+    input_folder : str
+        Path to folder containing input TIF files
+    output_folder : str
+        Path to folder where downsampled TIFs will be saved
+    downsample_xy : int
+        Downsampling factor for X and Y dimensions
+    downsample_t : int
+        Downsampling factor for time dimension (take every Nth frame)
+    n_workers : int
+        Number of parallel workers for Dask
+    """
+    import dask
+    from dask import delayed
+    import tifffile
+    import numpy as np
+    from scipy.ndimage import zoom
+    
+    # Create output folder if it doesn't exist
+    os.makedirs(output_folder, exist_ok=True)
+    
+    # Get list of TIF files
+    tif_files = sorted([f for f in os.listdir(input_folder) if f.endswith(('.tif', '.tiff'))])
+    tif_files = tif_files[::downsample_t]
+
+    if verbose:
+        print(f"Found {len(tif_files)} TIF files to process")
+    
+    @delayed
+    def process_single_tif(filename):
+        """Process a single TIF file: read, downsample, save."""
+        input_path = os.path.join(input_folder, filename)
+        output_path = os.path.join(output_folder, filename)
+        
+        # Read the TIF file
+        with tifffile.TiffFile(input_path) as tif:
+            image = tif.asarray()
+            # Try to get existing metadata
+            try:
+                original_metadata = tif.imagej_metadata or {}
+            except:
+                original_metadata = {}
+        
+        # Determine dimensions and downsample accordingly
+        # Expected format: TZCYX (5D) or ZCYX (4D) or ZYX (3D) or YX (2D)
+        ndim = image.ndim
+        
+        if ndim == 4:  # ZCYX or TCYX
+            image = image[:, :, ::downsample_xy, ::downsample_xy]
+        elif ndim == 3:  # ZYX or TYX
+            image = image[:, ::downsample_xy, ::downsample_xy]
+        elif ndim == 2:  # YX
+            image = image[::downsample_xy, ::downsample_xy]
+        
+        # Ensure 5D for saving (TZCYX)
+        while image.ndim < 5:
+            image = image[np.newaxis, ...]
+        
+        # Update metadata with new shape and adjusted spacing
+        metadata = {
+            'spacing_x': original_metadata.get('spacing_x', 1.0) * downsample_xy,
+            'spacing_y': original_metadata.get('spacing_y', 1.0) * downsample_xy,
+            'data_shape': image.shape,
+            'downsample_xy': downsample_xy,
+            'downsample_t': downsample_t,
+        }
+        
+        # Save using tifffile (same format as saveTiff_new)
+        spacing_x = metadata['spacing_x']
+        spacing_y = metadata['spacing_y']
+        
+        with tifffile.TiffWriter(output_path, imagej=True) as tif_writer:
+            tif_writer.write(
+                image, 
+                metadata=metadata, 
+                resolution=(1.0/spacing_x, 1.0/spacing_y)
+            )
+        
+        return filename
+    
+    # Create delayed tasks for all files
+    tasks = [process_single_tif(f) for f in tif_files]
+    
+    # Execute in parallel with progress bar
+    if verbose:
+        print(f"Processing {len(tasks)} files with {n_workers} workers...")
+    
+    from dask.diagnostics import ProgressBar
+    with ProgressBar():
+        with dask.config.set(scheduler='threads', num_workers=n_workers):
+            results = dask.compute(*tasks)
+    if verbose:
+        print(f"   Processed {len(results)} files")
+        print(f"   Output folder: {output_folder}")
+    return list(results)
+
+def downsample_nd2_to_tiff_folder(
+    nd2_path,
+    output_folder,
+    ds_xy=1,
+    ds_t=1,
+    frame_list=None,
+    slices=None,
+    channel=0,
+    n_workers=4,
+    dtype=np.float32,
+    verbose=True
+):
+    """
+    Downsample ND2 file using Dask (stride-based) and save as TIFF series in parallel.
+
+    Output:
+        One TIFF per frame, shape (Z, C, Y, X)
+        Compatible with both 2D and 3D ND2 files.
+
+    Parameters
+    ----------
+    nd2_path : str
+        Path to ND2 file
+    output_folder : str
+        Path to save downsampled TIFF series
+    ds_xy : int
+        XY downsampling factor
+    ds_t : int
+        Temporal downsampling factor (take every ds_t frame)
+    frame_list : list[int] | None
+        Only process frames in this list
+    slices : list | slice | None
+        Z slice selection (ignored safely for 2D ND2)
+    channel : int | list | None
+        Channel selection
+    n_workers : int
+        Number of threads
+    dtype : np.dtype
+        Output dtype
+    verbose : bool
+    """
+    from dask import delayed, compute
+    from dask.diagnostics import ProgressBar
+    os.makedirs(output_folder, exist_ok=True)
+    def normalize_index(idx):
+        if idx is None:
+            return slice(None)
+        if isinstance(idx, (int, np.integer)):
+            return slice(idx, idx + 1)
+        return idx
+
+    def ensure_5d_tzcyx(dask_data, dims, verbose=False):
+        """Normalize ND2 dask array to shape (T, Z, C, Y, X), works for 2D/3D"""
+        axis_map = {d: i for i, d in enumerate(dims)}
+
+        if "T" not in axis_map:
+            dask_data = dask_data[None, ...]
+            dims = ["T"] + dims
+            axis_map = {d: i for i, d in enumerate(dims)}
+
+        if "Z" not in axis_map:
+            z_axis = axis_map["T"] + 1
+            dask_data = dask_data[(slice(None),) * z_axis + (None,)]
+            dims = dims[:z_axis] + ["Z"] + dims[z_axis:]
+            axis_map = {d: i for i, d in enumerate(dims)}
+
+        if "C" not in axis_map:
+            c_axis = axis_map["Z"] + 1
+            dask_data = dask_data[(slice(None),) * c_axis + (None,)]
+            dims = dims[:c_axis] + ["C"] + dims[c_axis:]
+            axis_map = {d: i for i, d in enumerate(dims)}
+
+        # reorder to TZCYX
+        target_order = ["T", "Z", "C", "Y", "X"]
+        perm = [axis_map[d] for d in target_order]
+        dask_data = dask_data.transpose(*perm)
+        if verbose:
+            print(f"[INFO] Normalized ND2 shape -> TZCYX: {dask_data.shape}")
+        return dask_data
+    with nd2.ND2File(nd2_path) as f:
+        dask_data = f.to_dask()
+        dims = list(f.sizes.keys())
+        dask_data = ensure_5d_tzcyx(dask_data, dims, verbose)
+        if frame_list is not None:
+            frame_list = frame_list[::ds_t]
+        else:
+            frame_list = list(range(dask_data.shape[0]))
+            frame_list = frame_list[::ds_t]
+        dask_data = dask_data[frame_list]
+        dask_data = dask_data[
+            slice(None, None, 1),          # T
+            normalize_index(slices),          # Z
+            normalize_index(channel),         # C
+            slice(None, None, ds_xy),         # Y
+            slice(None, None, ds_xy)          # X
+        ]
+        if verbose:
+            print(f"[INFO] After slicing/downsample: {dask_data.shape}")
+    tasks = []
+    T = dask_data.shape[0]
+    for i in range(T):
+        frame_idx = frame_list[i]
+        @delayed
+        def save_frame(frame_data, out_folder=output_folder, fidx=frame_idx, ch=channel):
+            vol = frame_data.astype(dtype)
+            out_name = f"vol_ch{ch}_downsample_{fidx:06d}.tif"
+            out_path = os.path.join(out_folder, out_name)
+            tifffile.imwrite(out_path, vol, imagej=True)
+            return out_path
+
+        tasks.append(save_frame(dask_data[i]))
+    if verbose:
+        print(f"[INFO] Processing {T} frames with {n_workers} threads...")
+    with ProgressBar():
+        compute(*tasks, scheduler="threads", num_workers=n_workers)
+    if verbose:
+        print(f"[DONE] ND2 downsampled TIFFs saved to {output_folder}")
+    return [os.path.join(output_folder, f"vol_ch{channel}_downsample_{frame_list[i]:06d}.tif") for i in range(T)]
+
 
 def saveTiff(image_list, config_path, save_path):
     """

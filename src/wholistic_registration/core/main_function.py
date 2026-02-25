@@ -10,6 +10,7 @@ import multiprocessing as mp
 
 ####################################################################################################################
 ##  Define the parameters
+##  haven't update the params of the reliable analysis.
 def DefineParams(
                 configFile='./configs/config.toml',
                 inputFile=None,
@@ -37,7 +38,8 @@ def DefineParams(
                 tolerance=1e-3,
                 patch_sigma=3.,
                 offset_radius=5,
-                structure_thresh=0.6,
+                structure_tau=0.5,
+                structure_beta=0.1,
                 eps=1e-6,
                 save_ref=True,
                 save_motion=False,
@@ -173,9 +175,20 @@ def DefineParams(
         Percentile used to normalize the difference map.
         Only pixels within structured regions are considered.
         Controls the sensitivity of the resulting misalignment map (lower → more sensitive).
-    -structure_thresh : float (0-1)
-        Threshold for identifying structured (informative) regions based on MIND descriptor values.
-        Pixels below this threshold are treated as background and set to zero in the output map.
+    -structure_tau : float (0-1)
+        Structure activation threshold for soft gating.
+        Controls the location of the sigmoid transition applied to the
+        MIND-derived structure map. Pixels with structure response
+        S ≳ structure_tau are treated as foreground (structurally meaningful),
+        while S ≲ structure_tau are progressively suppressed as background.
+        Larger values make the mask more conservative, retaining only
+        high-structure regions.
+    -structure_beta : float
+        Softness (slope) parameter of the structure sigmoid.
+        Determines how sharp the transition is around structure_tau.
+        Smaller values yield a steeper, near-binary mask (hard gating),
+        while larger values produce a smoother, more tolerant weighting
+        that gradually attenuates low-structure regions.
     '''
     ## read the metadata
     print("Reading meta data")
@@ -301,7 +314,8 @@ def DefineParams(
     #change the ReliableAnalysis config
     config['ReliableAnalysis']['patch_sigma']=patch_sigma
     config['ReliableAnalysis']['offset_radius']=offset_radius
-    config['ReliableAnalysis']['structure_thresh']=structure_thresh
+    config['ReliableAnalysis']['structure_tau']=structure_tau
+    config['ReliableAnalysis']['structure_beta']=structure_beta
     config['ReliableAnalysis']['eps']=eps
 
     # change the save config
@@ -312,7 +326,7 @@ def DefineParams(
     # Create directory if it doesn't exist
     config_dir = os.path.dirname(os.path.abspath(configFile))
     if config_dir and not os.path.exists(config_dir):
-        os.makedirs(config_dir, exist_ok=True)
+        IO.reset_dir(config_dir)
         if verbose:
             print(f"[INFO]Created directory: {config_dir}")
     
@@ -378,7 +392,8 @@ def DefineParams(
         print("\n[ReliableAnalysis]")
         print(f"  patch_sigma(0~1)       : {config['ReliableAnalysis']['patch_sigma']}")
         print(f"  offset_radius          : {config['ReliableAnalysis']['offset_radius']}")
-        print(f"  structure_thresh(0~100): {config['ReliableAnalysis']['structure_thresh']}")
+        print(f"  structure_tau(0~1)     : {config['ReliableAnalysis']['structure_tau']}")
+        print(f"  structure_beta         : {config['ReliableAnalysis']['structure_beta']}")
 
         # ========== Resource Estimation Section ==========
         print("\n[Resource Estimation]")
@@ -520,10 +535,11 @@ def Registration_v3(configPath='./configs/config.toml', parallel=True):
     # basic params
     output_root = config['file_path']['registrated_path']
     movingFilePath = config['file_path']['input_path']
-
+    
     # get basic meta info
     Dim = config['MetaData']['Dim']
     total_frames = int(config['MetaData']['frames'])
+    dual_channel=config['channels']['dual_channel']
 
     # frames to process
     process_frames = config['frames']['frames']
@@ -548,23 +564,29 @@ def Registration_v3(configPath='./configs/config.toml', parallel=True):
             SIZE = config['MetaData']['SIZE']
             Z_full = int(SIZE[1])
             downsampleZ = list(range(Z_full))
+    elif Dim == 2:
+        downsampleZ=[0]
+    else:
+        raise ValueError("[ERROR]Invalid Dim in MetaData config.")
     # prepare output directories (one folder per channel)
     print("[INFO]Preparing output directories...")
     out_mem = os.path.join(output_root, "membrane")
-    out_ca  = os.path.join(output_root, "calcium")
     out_ref = os.path.join(output_root, "reference")
     out_mot = os.path.join(output_root, "motion")
 
-    os.makedirs(out_mem, exist_ok=True)
-    os.makedirs(out_ca, exist_ok=True)
-
+    IO.reset_dir(out_mem)
+    if dual_channel:
+        out_ca  = os.path.join(output_root, "calcium")
+        IO.reset_dir(out_ca)
+    else:
+        out_ca = None
     save_ref = bool(config['save_config']['save_ref'])
     save_motion = bool(config['save_config']['save_motion'])
 
     if save_ref:
-        os.makedirs(out_ref, exist_ok=True)
+        IO.reset_dir(out_ref)
     if save_motion:
-        os.makedirs(out_mot, exist_ok=True)
+        IO.reset_dir(out_mot)
 
     # Channel index mapping for file naming
     # Using channel indices as they appear in the ND2 file
@@ -597,15 +619,18 @@ def Registration_v3(configPath='./configs/config.toml', parallel=True):
 
     # load all of the frames to the memory is so memory-comsuming, so we downsample the frames
     mem_mid_downsample = IO.readND2Frame(movingFilePath, [process_frames[i] for i in list(range(mid_start, mid_end, mid_stride))], downsampleZ, channel=1, xy_down=downsampleXY, verbose=False)
-    ca_mid_downsample = IO.readND2Frame(movingFilePath, [process_frames[i] for i in list(range(mid_start, mid_end, mid_stride))], downsampleZ, channel=0, xy_down=downsampleXY, verbose=False)
-    print(f"[INFO]Loaded middle block frames {process_frames[frames_mid[0]]} to {process_frames[frames_mid[-1]]} with frames downsample {frame_downsample} ({mid_window_size} minutes)")
-
     # Remove singleton dimensions
     mem_mid_downsample = np.squeeze(mem_mid_downsample)
-    ca_mid_downsample = np.squeeze(ca_mid_downsample)
+
+    if dual_channel:
+        ca_mid_downsample = IO.readND2Frame(movingFilePath, [process_frames[i] for i in list(range(mid_start, mid_end, mid_stride))], downsampleZ, channel=0, xy_down=downsampleXY, verbose=False)
+        ca_mid_downsample = np.squeeze(ca_mid_downsample)
+    else:
+        ca_mid_downsample = None
+    print(f"[INFO]Loaded middle block frames {process_frames[frames_mid[0]]} to {process_frames[frames_mid[-1]]} with frames downsample {frame_downsample} ({mid_window_size} minutes)")
     
     # Compute initial reference image from middle block
-    ref_img = reference.compute_reference_from_block(mem_mid_downsample, ca_mid_downsample, config)
+    ref_img = reference.compute_reference_from_block(mem_mid_downsample, config, ca_mid_downsample)
     IO.write_volume_as_ome_tiff(
         ref_img, out_ref, 'ref',f"{process_frames[frames_mid[0]]}_{process_frames[frames_mid[-1]]}", configPath
     )
@@ -638,20 +663,23 @@ def Registration_v3(configPath='./configs/config.toml', parallel=True):
             movingFilePath, batch_frames, downsampleZ,
             channel=1, xy_down=downsampleXY, verbose=False
         )
-        ca_batch = IO.readND2Frame(
-            movingFilePath, batch_frames, downsampleZ,
-            channel=0, xy_down=downsampleXY, verbose=False
-        )
         mem_batch = np.squeeze(mem_batch)
-        ca_batch  = np.squeeze(ca_batch)
 
+        if dual_channel:
+            ca_batch = IO.readND2Frame(
+                movingFilePath, batch_frames, downsampleZ,
+                channel=0, xy_down=downsampleXY, verbose=False
+            )
+            ca_batch  = np.squeeze(ca_batch)
+        else:
+            ca_batch = None
         if Dim == 3  and len(downsampleZ) > 1:
             mem_reg, ca_reg, _, _, motion = registration.wbi_registration_3d(
-                mem_batch, ca_batch, configPath, ref_img, frame=batch_frames
+                mem_batch, configPath, ref_img, frame=batch_frames, moving_Ca_image= ca_batch
             )
         else:
             mem_reg, ca_reg, _, _, motion = registration.wbi_registration_2d(
-                mem_batch, ca_batch, configPath, ref_img, frame=batch_frames
+                mem_batch, configPath, ref_img, frame=batch_frames, moving_Ca_image= ca_batch
             )
         if i==0:
             motion_start = motion[0].copy()
@@ -662,9 +690,10 @@ def Registration_v3(configPath='./configs/config.toml', parallel=True):
             IO.write_volume_as_ome_tiff(
                 mem_reg[k], out_mem, channel_index_map['membrane'], fid, configPath
             )
-            IO.write_volume_as_ome_tiff(
-                ca_reg[k], out_ca, channel_index_map['calcium'], fid, configPath
-            )
+            if dual_channel:
+                IO.write_volume_as_ome_tiff(
+                    ca_reg[k], out_ca, channel_index_map['calcium'], fid, configPath
+                )
 
             if save_motion:
                 with h5py.File(
@@ -678,11 +707,13 @@ def Registration_v3(configPath='./configs/config.toml', parallel=True):
             for k in range(len(mem_reg)):
                 if len(head_mem) < reference_chunk:
                     head_mem.append(mem_reg[k])
-                    head_ca.append(ca_reg[k])
+                    if dual_channel:
+                        head_ca.append(ca_reg[k])
 
         for k in range(len(mem_reg)):
             tail_mem.append(mem_reg[k])
-            tail_ca.append(ca_reg[k])
+            if dual_channel:
+                tail_ca.append(ca_reg[k])
 
         del mem_batch, ca_batch, mem_reg, ca_reg, motion
 
@@ -890,7 +921,7 @@ def ReliableAnalysis(
     # Count total number of frames from membrane channel directory
     frames = sorted(os.listdir(mem_dir))
     T = config['MetaData']['frames']
-    
+    dual_channel = config['channels']['dual_channel']
     # Define correlation function based on channel configuration
     def compute_cor_fn(mem, ca):
         """
@@ -920,19 +951,19 @@ def ReliableAnalysis(
         return cor
     
     # Import ComputMask function from utils.reliableAnalysis module
-    from utils.reliableAnalysis import ComputMask
+    from utils.reliableAnalysis import ComputeMask_v2
     
     # Call ComputMask to perform actual mask computation
-    ComputMask(
+    ComputeMask_v2(
         mem_dir=mem_dir,
         ca_dir=ca_dir,
         ref_dir=ref_dir,
         out_dir=out_dir,
+        dual_channel=dual_channel,
         frames=config['frames']['frames'],
         config=config['ReliableAnalysis'],
         compute_cor_fn=compute_cor_fn,
-        configPath=configPath,
-        T=T,
+        configPath=configPath
     )
 
 ####################################################################################################################
@@ -991,11 +1022,15 @@ def create_downsample_dataset_v3(
     reg_path  = config['file_path']['registrated_path']
     mask_path = config['file_path']['mask_path']
     total_frames = config['MetaData']['frames']
-
+    dual_channel = config['channels']['dual_channel']
     base_dsXY = config['downsample']['downsampleXY']
     base_dsZ  = config['downsample']['downsampleZ']
-    if base_dsZ == -1:
+    if config['MetaData']['Dim'] == 3:
         base_dsZ = list(range(config['MetaData']['SIZE'][2]))
+    elif config['MetaData']['Dim'] == 2:
+        base_dsZ = [0]
+    else:
+        raise ValueError(f"[ERROR] Invalid Dim value in config. Must be 2 or 3. Dim={config['MetaData']['Dim']}")
 
     raw_dsXY = base_dsXY * ds_XY
 
@@ -1008,9 +1043,9 @@ def create_downsample_dataset_v3(
     mem_out_dir  = os.path.join(downsampleFilePath, "membrane")
     cal_out_dir  = os.path.join(downsampleFilePath, "calcium")
     mask_out_dir = os.path.join(downsampleFilePath, "mask")
-    os.makedirs(mem_out_dir, exist_ok=True)
-    os.makedirs(cal_out_dir, exist_ok=True)
-    os.makedirs(mask_out_dir, exist_ok=True)
+    IO.reset_dir(mem_out_dir)
+    IO.reset_dir(cal_out_dir)
+    IO.reset_dir(mask_out_dir)
     # ---------------- time indices ----------------
     time_index = config['frames']['frames'][::ds_T]
     T_ds = len(time_index)
@@ -1120,6 +1155,113 @@ def create_downsample_dataset_v3(
     if verbose:
         print("[ALL DONE] Downsampled dataset (v3) created successfully.")
 
+def create_downsample_dataset_v4(
+    configPath='./configs/config.toml',
+    downsampleFilePath='./registrated_downsample',
+    ds_XY=1,
+    ds_T=1,
+    n_workers=4,
+    verbose=True
+):
+    """
+    Create a downsampled dataset (v3) from registered and raw ND2 data.
+
+    This version:
+    - Uses lazy dask arrays for TIFF series to reduce peak memory usage
+    - Computes per block to avoid loading all frames at once
+    - Outputs membrane, calcium, and mask volumes
+    - Maintains XY and time downsampling
+
+    Parameters
+    ----------
+    configPath : str
+        Path to TOML configuration file (must contain input_path, registrated_path, mask_path, and metadata).
+    downsampleFilePath : str
+        Output directory for downsampled dataset.
+    ds_XY : int
+        XY downsampling factor applied on top of base downsample in config.
+    ds_T : int
+        Temporal downsampling factor (frames skipped along time axis).
+    block_size : int
+        Number of frames to process per block to reduce memory consumption.
+    verbose : bool
+        Whether to print progress information.
+
+    Outputs
+    -------
+    downsampleFilePath/
+        raw_membrane/: raw_membrane
+        membrane/    : registered_membrane
+        raw_calcium/ : raw_calcium
+        calcium/     : registered_calcium
+        mask/        : reference 
+        reference/   : reference 
+
+    Usage
+    -----
+    create_downsample_dataset_v4(
+        configPath='./configs/config.toml',
+        downsampleFilePath='./registrated_downsample',
+        ds_XY=4, ds_T=2, num_workers = 8, verbose=True
+    )
+    And you could see the result with FIJI by the code in the folder /macros ("ShowCaDownsample.ijm" and "ShowMemDownsample.ijm")
+
+    """
+    import shutil
+    # ---------------- load config ----------------
+    config = toml.load(configPath)
+    raw_path  = config['file_path']['input_path']
+    reg_path  = config['file_path']['registrated_path']
+    mask_path = config['file_path']['mask_path']
+    dual_channel = config['channels']['dual_channel']
+    base_dsXY = config['downsample']['downsampleXY']
+    base_dsZ  = config['downsample']['downsampleZ']
+    frames = config['frames']['frames']
+    if config['MetaData']['Dim'] == 3:
+        base_dsZ = list(range(config['MetaData']['SIZE'][2]))
+    elif config['MetaData']['Dim'] == 2:
+        base_dsZ = [0]
+    else:
+        raise ValueError(f"[ERROR] Invalid Dim value in config. Must be 2 or 3. Dim={config['MetaData']['Dim']}")
+    dual_channel = config['channels']['dual_channel']
+
+    raw_dsXY = base_dsXY * ds_XY
+
+    from utils.reliableAnalysis import build_reference_index
+
+    reg_mem_path = os.path.join(reg_path, "membrane")
+    reg_cal_path = os.path.join(reg_path, "calcium")
+    reg_ref_path = os.path.join(reg_path, "reference")
+    ref_map, _ = build_reference_index(reg_ref_path)
+
+    if os.path.exists(downsampleFilePath):
+        if verbose:
+            print(f"[INFO] Removing existing directory: {downsampleFilePath}")
+        shutil.rmtree(downsampleFilePath)
+
+    mem_out_dir  = os.path.join(downsampleFilePath, "membrane")
+    mask_out_dir = os.path.join(downsampleFilePath, "mask")
+    raw_mem_out_dir  = os.path.join(downsampleFilePath, "raw_membrane")
+    ref_out_dir  = os.path.join(downsampleFilePath, "reference")
+    IO.reset_dir(mem_out_dir)
+    IO.reset_dir(ref_out_dir)
+    IO.reset_dir(mask_out_dir)
+    IO.reset_dir(raw_mem_out_dir)
+    # ---------------- build lazy dask arrays ----------------
+
+    IO.downsample_tifs_dask(reg_ref_path,ref_out_dir,ds_XY,1,n_workers,verbose)
+    IO.downsample_tifs_dask(reg_mem_path,mem_out_dir,ds_XY,ds_T,n_workers,verbose)
+    IO.downsample_tifs_dask(mask_path,mask_out_dir,ds_XY,1,n_workers,verbose)
+    IO.downsample_nd2_to_tiff_folder(raw_path,raw_mem_out_dir,raw_dsXY,ds_T,frames,base_dsZ,1,n_workers=n_workers,verbose=verbose)
+
+    if dual_channel:
+        cal_out_dir  = os.path.join(downsampleFilePath, "calcium")
+        raw_cal_out_dir  = os.path.join(downsampleFilePath, "raw_calcium")
+        IO.reset_dir(cal_out_dir)
+        IO.reset_dir(raw_cal_out_dir)
+        IO.downsample_tifs_dask(reg_cal_path,cal_out_dir,ds_XY,ds_T,n_workers,verbose=verbose  )
+        IO.downsample_nd2_to_tiff_folder(raw_path,raw_cal_out_dir,raw_dsXY,ds_T,frames,base_dsZ,0,n_workers=n_workers,verbose=verbose)
+        
 ####################################################################################################################
 ####################################################################################################################
 ## helper functions
@@ -1284,7 +1426,7 @@ def process_directional_chunks(
         # Compute reference once per chunk
         # -------------------------------
         ref_img = reference.compute_reference_from_block(
-            list(ref_windows_mem), list(ref_windows_ca), config
+            list(ref_windows_mem), config, list(ref_windows_ca)
         )
 
         #renew the windows:
@@ -1307,7 +1449,7 @@ def process_directional_chunks(
         # Process in batches
         # -------------------------------
         num_frames = len(frames)
-        
+        dual_channel = config['channels']['dual_channel']
         for i in range(0, num_frames, batch_size):
             batch_frames = [frame_list[i] for i in frames[i:i + batch_size]]
             print(f"    batch {batch_frames[0]}~{batch_frames[-1]} (n={len(batch_frames)})")
@@ -1317,18 +1459,21 @@ def process_directional_chunks(
                 movingFilePath, batch_frames, downsampleZ,
                 channel=1, xy_down=downsampleXY, verbose=False
             ))
-            ca_batch  = np.squeeze(IO.readND2Frame(
-                movingFilePath, batch_frames, downsampleZ,
-                channel=0, xy_down=downsampleXY, verbose=False
-            ))
+            if dual_channel:
+                ca_batch  = np.squeeze(IO.readND2Frame(
+                    movingFilePath, batch_frames, downsampleZ,
+                    channel=0, xy_down=downsampleXY, verbose=False
+                ))
+            else:
+                ca_batch = None
             # Registration
             if Dim == 3 and len(downsampleZ) > 1:
                 mem_reg, ca_reg, _, _, motion = registration.wbi_registration_3d(
-                    mem_batch, ca_batch, configPath, ref_img, frame=batch_frames, direction=direction,motion_init=motion_init
+                    mem_batch, configPath, ref_img, frame=batch_frames, direction=direction,motion_init=motion_init, moving_Ca_image=ca_batch
                 )
             else:
                 mem_reg, ca_reg, _, _, motion = registration.wbi_registration_2d(
-                    mem_batch, ca_batch, configPath, ref_img, frame=batch_frames, direction=direction,motion_init=motion_init
+                    mem_batch, configPath, ref_img, frame=batch_frames, direction=direction,motion_init=motion_init, moving_Ca_image=ca_batch
                 )
             motion_init=motion[-1]
             # Save batch results immediately
@@ -1336,9 +1481,10 @@ def process_directional_chunks(
                 IO.write_volume_as_ome_tiff(
                     mem_reg[k], out_mem, channel_index_map['membrane'], fid, configPath
                 )
-                IO.write_volume_as_ome_tiff(
-                    ca_reg[k], out_ca, channel_index_map['calcium'], fid, configPath
-                )
+                if dual_channel:
+                    IO.write_volume_as_ome_tiff(
+                        ca_reg[k], out_ca, channel_index_map['calcium'], fid, configPath
+                    )
                 if save_motion:
                     with h5py.File(os.path.join(out_mot, f"motion_{fid:06d}.h5"), 'w') as hf:
                         hf.create_dataset('motion', data=motion[k], compression='gzip')
@@ -1348,7 +1494,8 @@ def process_directional_chunks(
                 # -------------------------------
                 # if direction == 'forward':
                 ref_windows_mem.append(mem_reg[k])
-                ref_windows_ca.append(ca_reg[k])
+                if dual_channel:
+                    ref_windows_ca.append(ca_reg[k])
                 # elif direction == 'backward':  # backward
                 #     if len(ref_windows_mem) < reference_chunk:
                 #         ref_windows_mem.append(mem_reg[k])

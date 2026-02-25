@@ -92,7 +92,7 @@ def pick_initial_reference(
 
 
 
-def compute_reference_from_block(mem_block, ca_block,config):
+def compute_reference_from_block(mem_block,config,ca_block = None):
     """Generate a reference image from a block of frames"""
     k=config['channels']['k']
     function=config['channels']['function']
