@@ -97,14 +97,15 @@ def compute_reference_from_block(mem_block,config,ca_block = None):
     k=config['channels']['k']
     function=config['channels']['function']
     dual_channels=config['channels']['dual_channel']
-    frames=max(len(mem_block)//2,50)
+    frames=min(len(mem_block)//2,50)
     mem_block = cp.asarray(mem_block)
     mem_ref, indsort = pick_initial_reference(mem_block,max_corr_frames=frames)
     if dual_channels:
-        ca_block = cp.asarray(ca_block)
-        Ca_ref = cp.mean(ca_block[indsort, :], axis=0)
-        Ca_ref_transform =transform(Ca_ref,k,function)
-        result = mem_ref + Ca_ref_transform
+        if k !=0:
+            ca_block = cp.asarray(ca_block)
+            Ca_ref = cp.mean(ca_block[indsort, :], axis=0)
+            Ca_ref_transform =transform(Ca_ref,k,function)
+            result = mem_ref + Ca_ref_transform
     else:
         result = mem_ref
     
