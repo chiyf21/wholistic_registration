@@ -10,7 +10,7 @@ from scipy.ndimage import gaussian_filter
 import re
 
 
-def write_multichannel_volume_as_ome_tiff(vol3d_list, out_dir, frame_idx, configPath,
+def write_multichannel_volume_as_ome_tiff(vol3d_list, out_dir, frame_idx, configPath=None,
                                           spacing_x=1.0, spacing_y=1.0):
     """
     vol3d_list: list of 3 arrays, each (Z,Y,X)
@@ -343,7 +343,9 @@ def reliability_map(
     outlier_mask = np.abs(z_robust) > outlier_sigma
     R_local[outlier_mask] = 0.0
     return R_local.astype(np.float32)
-def reliability_map_v2(template, sigma = 1.5, eps=1e-6):
+
+
+def reliability_map_v2(template, sigma=1.5, eps=1e-6):
     """
     Continuous reliability map based on:
     - low gradient (structure stability)
@@ -351,44 +353,63 @@ def reliability_map_v2(template, sigma = 1.5, eps=1e-6):
     Output: float32 in [0,1]
     """
     template = cp.asarray(template, dtype=cp.float32)
-    def gradient_amplitude(volume: cp.ndarray) -> np.ndarray:
-        if isinstance(volume, np.ndarray):
-            volume = cp.asarray(volume, dtype=cp.float32)
-        if volume.ndim == 2:  # 2D
-            gy = cupy_ndimage.sobel(volume, axis=0)
-            gx = cupy_ndimage.sobel(volume, axis=1)
-            result = cp.sqrt(gx**2 + gy**2)
-        elif volume.ndim == 3:  # 3D
-            gz = cupy_ndimage.sobel(volume, axis=0)
-            gy = cupy_ndimage.sobel(volume, axis=1)
-            gx = cupy_ndimage.sobel(volume, axis=2)
-            result = cp.sqrt(gx**2 + gy**2 + gz**2)
-        else:
-            raise ValueError("only support 2D or 3D data")
-        return result
+    is_2d = (template.ndim == 2)
+
+    def gradient_amplitude(volume):
+        gy = cupy_ndimage.sobel(volume, axis=0)
+        gx = cupy_ndimage.sobel(volume, axis=1)
+        return cp.sqrt(gx**2 + gy**2)
+
+    def gaussian_smooth_per_slice(arr, sigma):
+        if arr.ndim == 2:
+            return cupy_ndimage.gaussian_filter(arr, sigma=sigma)
+        out = cp.empty_like(arr, dtype=cp.float32)
+        for z in range(arr.shape[0]):
+            out[z] = cupy_ndimage.gaussian_filter(arr[z], sigma=sigma)
+        return out
+
+    def weighted_quantile_cp(x, w,  eps=1e-12):
+        x = x.ravel()
+        w = cp.clip(w.ravel(), 0, None)
+
+        idx = cp.argsort(x)
+        x_sorted = x[idx]
+        w_sorted = w[idx]
+
+        cw = cp.cumsum(w_sorted)
+        cw = cw / (cw[-1] + eps)
+
+        j = cp.searchsorted(cw, cp.asarray(0.5, dtype=cp.float32))
+        j = cp.clip(j, 0, x_sorted.size - 1)
+        return x_sorted[j]
+
     # gradient amplitude
     Iamp = gradient_amplitude(template)
+    # gradient-based reliability
     Iamp_mu = cp.median(Iamp)
     Iamp_sigma = cp.std(Iamp) + eps
     Iz = (Iamp - Iamp_mu) / Iamp_sigma
-    # smooth
-    Iz_sm = cupy_ndimage.gaussian_filter(Iz, sigma=sigma)
-    # Gradient reliability (low gradient = high reliability)
+    Iz_sm = gaussian_smooth_per_slice(Iz, sigma=sigma)
     tau_g = cp.std(Iz_sm) + eps
     R_grad = cp.exp(-(Iz_sm ** 2) / (2 * tau_g ** 2))
-    # normalize 
     R_grad = R_grad / (cp.max(R_grad) + eps)
-    p60 = cp.percentile(template, 60)
-    p99 = cp.percentile(template, 99)
-    R_int = (template - p60) / (p99 - p60 + eps)
+    # intensity-based reliability
+    g_mad = cp.median(cp.abs(Iamp - Iamp_mu)) + eps
+    g_robust = (Iamp - Iamp_mu) / (1.4826 * g_mad + eps)
+
+    w_bg = cp.exp(-cp.clip(g_robust, -5, 5) ** 2 / 2.0)
+    p_low = weighted_quantile_cp(template, w_bg)
+    p_hi = cp.percentile(template, 99)
+
+    R_int = (template - p_low) / (p_hi - p_low + eps)
     R_int = cp.clip(R_int, 0, 1)
+
+    # final reliability
     R = R_grad * R_int
-    R = cupy_ndimage.gaussian_filter(R, sigma=sigma)
+    R = gaussian_smooth_per_slice(R, sigma=sigma)
     R = R / (cp.max(R) + eps)
-    if isinstance(R, np.ndarray):
-        return R
-    else:
-        return R.get()
+
+    return cp.asnumpy(R)
 
 # pre version
 def photometric_align_robust(I_ref, I_mov, R, r_threshold=0.3, eps=1e-6):
@@ -420,9 +441,10 @@ def structural_difference_map(
 
     R_ref = reliability_map_v2(I_ref, sigma=sigma_reliability)
     R_mov = reliability_map_v2(I_mov, sigma=sigma_reliability)
-    R = np.minimum(R_ref, R_mov)
-    import tifffile
-    tifffile.imwrite("/home/cyf/wbi/Virginia/registrated_data/f2013/R.tif", R)
+
+    R = np.maximum(R_ref, R_mov) ##minumum?
+    # import tifffile
+    # tifffile.imwrite("/home/cyf/wbi/Virginia/registrated_data/f2013/R.tif", R)
     # I_mov_corr = photometric_align_robust(
     #     I_ref,
     #     I_mov,
@@ -433,8 +455,16 @@ def structural_difference_map(
         I_ref,
         I_mov
     )
-    mu_ref = gaussian_filter(I_ref, sigma_structure)
-    mu_mov = gaussian_filter(I_mov_corr, sigma_structure)
+    if len(I_ref.shape) == 2:
+        mu_ref = gaussian_filter(I_ref, sigma_structure)
+        mu_mov = gaussian_filter(I_mov_corr, sigma_structure)
+    else:
+        mu_ref = np.empty_like(I_ref, dtype=np.float32)
+        mu_mov = np.empty_like(I_mov_corr, dtype=np.float32)
+
+        for z in range(I_ref.shape[0]):
+            mu_ref[z] = gaussian_filter(I_ref[z], sigma=sigma_structure)
+            mu_mov[z] = gaussian_filter(I_mov_corr[z], sigma=sigma_structure)
 
     diff = np.abs(mu_ref - mu_mov)
 
@@ -451,8 +481,8 @@ def structural_difference_map(
     # tifffile.imwrite("/home/cyf/wbi/Virginia/registrated_data/f2013/diff.tif", diff)
     Z = diff / scale
     D = 1.0 - np.exp(-Z**2)
-    import tifffile
-    tifffile.imwrite("/home/cyf/wbi/Virginia/registrated_data/f2013/D.tif", D)
+    # import tifffile
+    # tifffile.imwrite("/home/cyf/wbi/Virginia/registrated_data/f2013/D.tif", D)
 
     D_final = D * R
 
@@ -651,27 +681,33 @@ def ComputeMask_v2(
     
     # Process each frame
     for i in range(len(ref_files)-1):
-        ## test
         print(f"Compute difference between {ref_files[i]} and {ref_files[i+1]} ")
         
         ref_pre = tifffile.imread(os.path.join(ref_dir,ref_files[i]))
         ref_post = tifffile.imread(os.path.join(ref_dir,ref_files[i+1]))
 
-        mask_map,_,_ = structural_difference_map(ref_pre,
+        mask_map,diff_map,rely_map = structural_difference_map(ref_pre,
                                         ref_post,
                                         )
+        # print("ref_pre.shape : ",ref_pre.shape)
+        # print("ref_post.shape: ",ref_post.shape)
+        # print("mask_map.shape: ",mask_map.shape)
+        # print("diff_map.shape: ",diff_map.shape)
+        # print("rely_map.shape: ",rely_map.shape)
         if isinstance(mask_map,np.ndarray):
             # Save downsampled mask
             IO.write_multichannel_volume_as_ome_tiff(
-                volume=[ref_pre,ref_post,mask_map],      # single channel
+                volume=[ref_pre,ref_post,mask_map,diff_map,rely_map],      # single channel
                 out_dir=out_dir,
                 frame_idx=i,
                 configPath=configPath,
                 label='mask'
             )
         else:
+
+
             IO.write_multichannel_volume_as_ome_tiff(
-                volume=[ref_pre,ref_post,mask_map.get()],      # single channel
+                volume=[ref_pre,ref_post,mask_map.get(),diff_map.get(),rely_map.get()],      # single channel
                 out_dir=out_dir,
                 frame_idx=i,
                 configPath=configPath,

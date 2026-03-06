@@ -695,7 +695,7 @@ def getMotion(dat_mov, dat_ref, option, verbose=False):
             max_motion = np.max(np.abs(motion_current))
             if verbose:
                 print(
-                    f"Downsample layer: {layer}\tIter: {iter}\tMax motion: {max_motion:.2f}\tMax diff. old vs new motion: {max_diff_motion:.4f} \n\n"
+                    f"Downsample layer: {layer}\tIter: {iter}\tMax motion: {max_motion:.2f}\tMax diff. old vs new motion: {max_diff_motion:.4f}"
                 )
 
             if max_diff_motion < 1e-3:
