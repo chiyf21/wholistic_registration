@@ -28,6 +28,7 @@ import dask.delayed
 from glob import glob
 import os
 import time
+import shutil
 
 def readMeta(filePath,Ifprint=True):
     """
@@ -451,6 +452,21 @@ def downsample_tiff_series(tiff_folder_or_list, xy_down=4, batch_processing=Fals
                                                   final_result.shape[3]//2, 
                                                   final_result.shape[4]//2))
 
+def reset_dir(path):
+    if os.path.exists(path):
+        ans = input(f"Directory '{path}' exists. Delete it? [y/N]: ").strip().lower()
+        if ans in ["y", "yes"]:
+            confirm = input("This will permanently delete the directory. Continue? [y/N]: ").strip().lower()
+            if confirm in ["y", "yes"]:
+                shutil.rmtree(path)
+                os.makedirs(path)
+                print("Directory reset.")
+            else:
+                print("Cancelled.")
+        else:
+            print("Cancelled.")
+    else:
+        os.makedirs(path)
 def downsample_tifs_dask(input_folder, output_folder, downsample_xy=4, downsample_t=1, n_workers=4,verbose=True):
     """
     Read TIF files, downsample, and save to new folder using Dask for parallelization.
@@ -479,6 +495,8 @@ def downsample_tifs_dask(input_folder, output_folder, downsample_xy=4, downsampl
     
     # Get list of TIF files
     tif_files = sorted([f for f in os.listdir(input_folder) if f.endswith(('.tif', '.tiff'))])
+    tif_files = tif_files[::downsample_t]
+
     if verbose:
         print(f"Found {len(tif_files)} TIF files to process")
     
@@ -501,10 +519,7 @@ def downsample_tifs_dask(input_folder, output_folder, downsample_xy=4, downsampl
         # Expected format: TZCYX (5D) or ZCYX (4D) or ZYX (3D) or YX (2D)
         ndim = image.ndim
         
-        if ndim == 5:  # TZCYX
-            # Downsample T and XY
-            image = image[::downsample_t, :, :, ::downsample_xy, ::downsample_xy]
-        elif ndim == 4:  # ZCYX or TCYX
+        if ndim == 4:  # ZCYX or TCYX
             image = image[:, :, ::downsample_xy, ::downsample_xy]
         elif ndim == 3:  # ZYX or TYX
             image = image[:, ::downsample_xy, ::downsample_xy]
@@ -549,7 +564,7 @@ def downsample_tifs_dask(input_folder, output_folder, downsample_xy=4, downsampl
         with dask.config.set(scheduler='threads', num_workers=n_workers):
             results = dask.compute(*tasks)
     if verbose:
-        print(f"✅ Processed {len(results)} files")
+        print(f"   Processed {len(results)} files")
         print(f"   Output folder: {output_folder}")
     return list(results)
 
@@ -637,11 +652,13 @@ def downsample_nd2_to_tiff_folder(
         dims = list(f.sizes.keys())
         dask_data = ensure_5d_tzcyx(dask_data, dims, verbose)
         if frame_list is not None:
-            dask_data = dask_data[frame_list]
+            frame_list = frame_list[::ds_t]
         else:
             frame_list = list(range(dask_data.shape[0]))
+            frame_list = frame_list[::ds_t]
+        dask_data = dask_data[frame_list]
         dask_data = dask_data[
-            slice(None, None, ds_t),          # T
+            slice(None, None, 1),          # T
             normalize_index(slices),          # Z
             normalize_index(channel),         # C
             slice(None, None, ds_xy),         # Y
@@ -651,17 +668,26 @@ def downsample_nd2_to_tiff_folder(
             print(f"[INFO] After slicing/downsample: {dask_data.shape}")
     tasks = []
     T = dask_data.shape[0]
+    @delayed
+    def save_frame_outer(frame_data, out_folder, fidx, ch, dtype):
+        vol = frame_data.astype(dtype)
+        out_name = f"vol_ch{ch}_downsample_{fidx:06d}.tif"
+        out_path = os.path.join(out_folder, out_name)
+        tifffile.imwrite(out_path, vol, imagej=True)
+        return out_path
     for i in range(T):
         frame_idx = frame_list[i]
-        @delayed
-        def save_frame(frame_data, out_folder=output_folder, fidx=frame_idx, ch=channel):
-            vol = frame_data.astype(dtype)
-            out_name = f"vol_ch{ch}_downsample_{fidx:06d}.tif"
-            out_path = os.path.join(out_folder, out_name)
-            tifffile.imwrite(out_path, vol, imagej=True)
-            return out_path
+        #测试在外面可以吗
+        # @delayed
+        # def save_frame(frame_data, out_folder=output_folder, fidx=frame_idx, ch=channel):
+        #     vol = frame_data.astype(dtype)
+        #     out_name = f"vol_ch{ch}_downsample_{fidx:06d}.tif"
+        #     out_path = os.path.join(out_folder, out_name)
+        #     tifffile.imwrite(out_path, vol, imagej=True)
+        #     return out_path
 
-        tasks.append(save_frame(dask_data[i]))
+        # tasks.append(save_frame(dask_data[i]))
+        # tasks.append(save_frame_outer(dask_data[i],output_folder,fidx=frame_idx,ch=channel,dtype = dtype))
     if verbose:
         print(f"[INFO] Processing {T} frames with {n_workers} threads...")
     with ProgressBar():
@@ -716,14 +742,6 @@ def saveTiff_new(image, save_path, config_path =None, metadata = None, verbose=T
     if image.ndim != 5:
         raise ValueError("All saved should be 5D (TZCYX)")
 
-    config_str = None
-    # if config_path is not None:
-    #     import json
-    #     config_data = toml.load(config_path)
-    #     config_str = json.dumps(config_data, ensure_ascii=False)
-    # else:
-    #     config_str = None
-
     if metadata is not None:
         spacing_x = metadata['spacing_x']
         spacing_y = metadata['spacing_y']
@@ -740,10 +758,11 @@ def saveTiff_new(image, save_path, config_path =None, metadata = None, verbose=T
         print(f"Saving TIFF file to {save_path}")
         print(f"  - shape: {image.shape}")
         print(f"  - spacing: {spacing_x}, {spacing_y}")
-        print(f"  - config: {config_str}")
+        if config_path is not None:
+            print(f"  - config: {config_path}")
 
     with tifffile.TiffWriter(save_path, imagej=True) as tif:
-        tif.write(image, metadata=metadata, resolution=(1.0/spacing_x, 1.0/spacing_y), description=config_str)
+        tif.write(image, metadata=metadata, resolution=(1.0/spacing_x, 1.0/spacing_y), description=config_path)
 
 
     
@@ -848,14 +867,14 @@ def saveZarr_fast(mem_data, ca_data, reference, config_path, save_path,
                       
 def readTifff(tiff_path):
     #haven't tested
-    import json
-
     with tifffile.TiffFile(tiff_path) as tif:
-        images = [page.asarray() for page in tif.pages]
-        desc = tif.pages[0].tags["ImageDescription"].value
-        config = json.loads(desc)
+        images = tif.asarray()
+        # description
+        desc = tif.pages[0].tags.get("ImageDescription")
+        if desc is not None:
+            desc = desc.value
+    return images, desc
 
-    return images, config
 def write_volume_as_ome_tiff(volume, out_dir, ch_idx, frame_idx, configPath,
                              spacing_x=1.0, spacing_y=1.0):
     """
@@ -912,7 +931,7 @@ def write_volume_as_ome_tiff(volume, out_dir, ch_idx, frame_idx, configPath,
                     metadata=metadata, verbose=False)
 
     return fname
-def write_multichannel_volume_as_ome_tiff(volume, out_dir, frame_idx, configPath,label=None,
+def write_multichannel_volume_as_ome_tiff(volume, out_dir, frame_idx, configPath=None,label=None,
                                           spacing_x=1.0, spacing_y=1.0):
     """
     volume: list of c arrays, each (Z,Y,X)

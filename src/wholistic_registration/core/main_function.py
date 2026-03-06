@@ -10,6 +10,7 @@ import multiprocessing as mp
 
 ####################################################################################################################
 ##  Define the parameters
+##  haven't update the params of the reliable analysis.
 def DefineParams(
                 configFile='./configs/config.toml',
                 inputFile=None,
@@ -37,7 +38,8 @@ def DefineParams(
                 tolerance=1e-3,
                 patch_sigma=3.,
                 offset_radius=5,
-                structure_thresh=0.6,
+                structure_tau=0.5,
+                structure_beta=0.1,
                 eps=1e-6,
                 save_ref=True,
                 save_motion=False,
@@ -173,9 +175,20 @@ def DefineParams(
         Percentile used to normalize the difference map.
         Only pixels within structured regions are considered.
         Controls the sensitivity of the resulting misalignment map (lower → more sensitive).
-    -structure_thresh : float (0-1)
-        Threshold for identifying structured (informative) regions based on MIND descriptor values.
-        Pixels below this threshold are treated as background and set to zero in the output map.
+    -structure_tau : float (0-1)
+        Structure activation threshold for soft gating.
+        Controls the location of the sigmoid transition applied to the
+        MIND-derived structure map. Pixels with structure response
+        S ≳ structure_tau are treated as foreground (structurally meaningful),
+        while S ≲ structure_tau are progressively suppressed as background.
+        Larger values make the mask more conservative, retaining only
+        high-structure regions.
+    -structure_beta : float
+        Softness (slope) parameter of the structure sigmoid.
+        Determines how sharp the transition is around structure_tau.
+        Smaller values yield a steeper, near-binary mask (hard gating),
+        while larger values produce a smoother, more tolerant weighting
+        that gradually attenuates low-structure regions.
     '''
     ## read the metadata
     print("Reading meta data")
@@ -301,7 +314,8 @@ def DefineParams(
     #change the ReliableAnalysis config
     config['ReliableAnalysis']['patch_sigma']=patch_sigma
     config['ReliableAnalysis']['offset_radius']=offset_radius
-    config['ReliableAnalysis']['structure_thresh']=structure_thresh
+    config['ReliableAnalysis']['structure_tau']=structure_tau
+    config['ReliableAnalysis']['structure_beta']=structure_beta
     config['ReliableAnalysis']['eps']=eps
 
     # change the save config
@@ -312,7 +326,7 @@ def DefineParams(
     # Create directory if it doesn't exist
     config_dir = os.path.dirname(os.path.abspath(configFile))
     if config_dir and not os.path.exists(config_dir):
-        os.makedirs(config_dir, exist_ok=True)
+        IO.reset_dir(config_dir)
         if verbose:
             print(f"[INFO]Created directory: {config_dir}")
     
@@ -378,7 +392,8 @@ def DefineParams(
         print("\n[ReliableAnalysis]")
         print(f"  patch_sigma(0~1)       : {config['ReliableAnalysis']['patch_sigma']}")
         print(f"  offset_radius          : {config['ReliableAnalysis']['offset_radius']}")
-        print(f"  structure_thresh(0~100): {config['ReliableAnalysis']['structure_thresh']}")
+        print(f"  structure_tau(0~1)     : {config['ReliableAnalysis']['structure_tau']}")
+        print(f"  structure_beta         : {config['ReliableAnalysis']['structure_beta']}")
 
         # ========== Resource Estimation Section ==========
         print("\n[Resource Estimation]")
@@ -559,19 +574,19 @@ def Registration_v3(configPath='./configs/config.toml', parallel=True):
     out_ref = os.path.join(output_root, "reference")
     out_mot = os.path.join(output_root, "motion")
 
-    os.makedirs(out_mem, exist_ok=True)
+    IO.reset_dir(out_mem)
     if dual_channel:
         out_ca  = os.path.join(output_root, "calcium")
-        os.makedirs(out_ca, exist_ok=True)
+        IO.reset_dir(out_ca)
     else:
         out_ca = None
     save_ref = bool(config['save_config']['save_ref'])
     save_motion = bool(config['save_config']['save_motion'])
 
     if save_ref:
-        os.makedirs(out_ref, exist_ok=True)
+        IO.reset_dir(out_ref)
     if save_motion:
-        os.makedirs(out_mot, exist_ok=True)
+        IO.reset_dir(out_mot)
 
     # Channel index mapping for file naming
     # Using channel indices as they appear in the ND2 file
@@ -936,10 +951,10 @@ def ReliableAnalysis(
         return cor
     
     # Import ComputMask function from utils.reliableAnalysis module
-    from utils.reliableAnalysis import ComputMask
+    from utils.reliableAnalysis import ComputeMask_v2
     
     # Call ComputMask to perform actual mask computation
-    ComputMask(
+    ComputeMask_v2(
         mem_dir=mem_dir,
         ca_dir=ca_dir,
         ref_dir=ref_dir,
@@ -1028,9 +1043,9 @@ def create_downsample_dataset_v3(
     mem_out_dir  = os.path.join(downsampleFilePath, "membrane")
     cal_out_dir  = os.path.join(downsampleFilePath, "calcium")
     mask_out_dir = os.path.join(downsampleFilePath, "mask")
-    os.makedirs(mem_out_dir, exist_ok=True)
-    os.makedirs(cal_out_dir, exist_ok=True)
-    os.makedirs(mask_out_dir, exist_ok=True)
+    IO.reset_dir(mem_out_dir)
+    IO.reset_dir(cal_out_dir)
+    IO.reset_dir(mask_out_dir)
     # ---------------- time indices ----------------
     time_index = config['frames']['frames'][::ds_T]
     T_ds = len(time_index)
@@ -1208,6 +1223,80 @@ def create_downsample_dataset_v4(
 
     from utils.reliableAnalysis import build_reference_index
 
+def create_downsample_dataset_v4(
+    configPath='./configs/config.toml',
+    downsampleFilePath='./registrated_downsample',
+    ds_XY=1,
+    ds_T=1,
+    n_workers=4,
+    verbose=True
+):
+    """
+    Create a downsampled dataset (v3) from registered and raw ND2 data.
+
+    This version:
+    - Uses lazy dask arrays for TIFF series to reduce peak memory usage
+    - Computes per block to avoid loading all frames at once
+    - Outputs membrane, calcium, and mask volumes
+    - Maintains XY and time downsampling
+
+    Parameters
+    ----------
+    configPath : str
+        Path to TOML configuration file (must contain input_path, registrated_path, mask_path, and metadata).
+    downsampleFilePath : str
+        Output directory for downsampled dataset.
+    ds_XY : int
+        XY downsampling factor applied on top of base downsample in config.
+    ds_T : int
+        Temporal downsampling factor (frames skipped along time axis).
+    block_size : int
+        Number of frames to process per block to reduce memory consumption.
+    verbose : bool
+        Whether to print progress information.
+
+    Outputs
+    -------
+    downsampleFilePath/
+        raw_membrane/: raw_membrane
+        membrane/    : registered_membrane
+        raw_calcium/ : raw_calcium
+        calcium/     : registered_calcium
+        mask/        : reference 
+        reference/   : reference 
+
+    Usage
+    -----
+    create_downsample_dataset_v4(
+        configPath='./configs/config.toml',
+        downsampleFilePath='./registrated_downsample',
+        ds_XY=4, ds_T=2, num_workers = 8, verbose=True
+    )
+    And you could see the result with FIJI by the code in the folder /macros ("ShowCaDownsample.ijm" and "ShowMemDownsample.ijm")
+
+    """
+    import shutil
+    # ---------------- load config ----------------
+    config = toml.load(configPath)
+    raw_path  = config['file_path']['input_path']
+    reg_path  = config['file_path']['registrated_path']
+    mask_path = config['file_path']['mask_path']
+    dual_channel = config['channels']['dual_channel']
+    base_dsXY = config['downsample']['downsampleXY']
+    base_dsZ  = config['downsample']['downsampleZ']
+    frames = config['frames']['frames']
+    if config['MetaData']['Dim'] == 3:
+        base_dsZ = list(range(config['MetaData']['SIZE'][2]))
+    elif config['MetaData']['Dim'] == 2:
+        base_dsZ = [0]
+    else:
+        raise ValueError(f"[ERROR] Invalid Dim value in config. Must be 2 or 3. Dim={config['MetaData']['Dim']}")
+    dual_channel = config['channels']['dual_channel']
+
+    raw_dsXY = base_dsXY * ds_XY
+
+    from utils.reliableAnalysis import build_reference_index
+
     reg_mem_path = os.path.join(reg_path, "membrane")
     reg_cal_path = os.path.join(reg_path, "calcium")
     reg_ref_path = os.path.join(reg_path, "reference")
@@ -1222,24 +1311,25 @@ def create_downsample_dataset_v4(
     mask_out_dir = os.path.join(downsampleFilePath, "mask")
     raw_mem_out_dir  = os.path.join(downsampleFilePath, "raw_membrane")
     ref_out_dir  = os.path.join(downsampleFilePath, "reference")
-    os.makedirs(mem_out_dir, exist_ok=True)
-    os.makedirs(ref_out_dir, exist_ok=True)
-    os.makedirs(mask_out_dir, exist_ok=True)
-    os.makedirs(raw_mem_out_dir, exist_ok=True)
+    IO.reset_dir(mem_out_dir)
+    IO.reset_dir(ref_out_dir)
+    IO.reset_dir(mask_out_dir)
+    IO.reset_dir(raw_mem_out_dir)
     # ---------------- build lazy dask arrays ----------------
 
-    IO.downsample_tifs_dask(reg_ref_path,ref_out_dir,ds_XY,ds_T,n_workers,verbose)
+    IO.downsample_tifs_dask(reg_ref_path,ref_out_dir,ds_XY,1,n_workers,verbose)
     IO.downsample_tifs_dask(reg_mem_path,mem_out_dir,ds_XY,ds_T,n_workers,verbose)
-    IO.downsample_tifs_dask(mask_path,mask_out_dir,ds_XY,ds_T,n_workers,verbose)
+    IO.downsample_tifs_dask(mask_path,mask_out_dir,ds_XY,1,n_workers,verbose)
     IO.downsample_nd2_to_tiff_folder(raw_path,raw_mem_out_dir,raw_dsXY,ds_T,frames,base_dsZ,1,n_workers=n_workers,verbose=verbose)
 
     if dual_channel:
         cal_out_dir  = os.path.join(downsampleFilePath, "calcium")
         raw_cal_out_dir  = os.path.join(downsampleFilePath, "raw_calcium")
-        os.makedirs(cal_out_dir, exist_ok=True)
-        os.makedirs(raw_cal_out_dir, exist_ok=True)
+        IO.reset_dir(cal_out_dir)
+        IO.reset_dir(raw_cal_out_dir)
         IO.downsample_tifs_dask(reg_cal_path,cal_out_dir,ds_XY,ds_T,n_workers,verbose=verbose  )
         IO.downsample_nd2_to_tiff_folder(raw_path,raw_cal_out_dir,raw_dsXY,ds_T,frames,base_dsZ,0,n_workers=n_workers,verbose=verbose)
+        
 ####################################################################################################################
 ####################################################################################################################
 ## helper functions

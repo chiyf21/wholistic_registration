@@ -239,7 +239,7 @@ def wbi_registration_3d(moving_membrane_image,config_file,reference_image=None,m
 
     #inital the motion
     if motion_init is None:
-        option['motion']=np.zeros([dat_ref.shape[0],dat_ref.shape[1],2,3])
+        option['motion']=np.zeros([Lx,Ly,Lz,3])
     else:
         option['motion']=motion_init
     #initial the pyramid parameters

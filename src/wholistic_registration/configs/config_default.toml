@@ -159,12 +159,24 @@ smoothPenalty=0.08
 #      Percentile used to normalize the difference map.
 #      Only pixels within structured regions are considered.
 #      Controls the sensitivity of the resulting misalignment map (lower → more sensitive).
-#   -structure_thresh : float (0-1)
-#      Threshold for identifying structured (informative) regions based on MIND descriptor values.
-#      Pixels below this threshold are treated as background and set to zero in the output map.
+#   -structure_tau : float (0-1)
+#       Structure activation threshold for soft gating.
+#       Controls the location of the sigmoid transition applied to the
+#       MIND-derived structure map. Pixels with structure response
+#       S ≳ structure_tau are treated as foreground (structurally meaningful),
+#       while S ≲ structure_tau are progressively suppressed as background.
+#       Larger values make the mask more conservative, retaining only
+#       high-structure regions.
+#   -structure_beta : float
+#       Softness (slope) parameter of the structure sigmoid.
+#       Determines how sharp the transition is around structure_tau.
+#       Smaller values yield a steeper, near-binary mask (hard gating),
+#       while larger values produce a smoother, more tolerant weighting
+#       that gradually attenuates low-structure regions.
 patch_sigma=3.0
 offset_radius=5
-structure_thresh=0.6
+structure_tau=0.5
+structure_beta=0.1
 eps=1e-6
 
 
