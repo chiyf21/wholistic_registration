@@ -29,6 +29,7 @@ X &\to \phi(X) = X_0' + \Delta X' \\
 \text{s.t. } X_0' &\in \Omega_{ref}
 \end{aligned}
 $$
+
 where \(X_0'\) is a initial mapping
 And we could rewrite the loss function as:
 
@@ -42,6 +43,7 @@ $$
 $$
 
 Then we have
+
 $$
 \begin{aligned}
    \frac {\partial L(\phi)}{\partial \Delta X_a'}&=2\frac{\partial I_{\text{ref}}(X'+\Delta X_a')}{\partial X}[I_{ref}(X'+\Delta X_a')-I_{mov}(X)+\frac{\partial I_{\text{ref}}(X'+\Delta X_a')}{\partial X} \Delta X_a']\\
@@ -49,6 +51,7 @@ $$
    &=0\
 \end{aligned}
 $$
+
 The format is the same as before, so we needn't to change the solution.
 
 
