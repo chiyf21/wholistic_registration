@@ -21,6 +21,10 @@ dependencies = [
 
 [project.optional-dependencies]
 gpu = ["cupy"]
+gui = ["PyQt5", "matplotlib"]
+
+[project.scripts]
+wholistic-gui = "wholistic_registration.gui.app:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}             
