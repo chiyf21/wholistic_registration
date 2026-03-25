@@ -46,3 +46,30 @@ This package is supported for *Linux* and *Windows*. The package has been tested
 
 ### Hardware Requirements
 - A discrete GPU with sufficient memory is recommended for acceleration.
+
+
+## License
+
+This software is licensed under the **BSD 3-Clause License**.
+
+Copyright © 2024 Howard Hughes Medical Institute
+
+Redistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice
+2. Redistributions in binary form must reproduce the above copyright notice in the documentation
+3. Neither the name of HHMI nor the names of its contributors may be used to endorse or promote products derived from this software without specific prior written permission
+
+See the [LICENSE](LICENSE) file for the full license text.
+
+## Acknowledgments
+
+This project was developed at [Janelia Research Campus](https://www.janelia.org/), Howard Hughes Medical Institute.
+
+## Citation
+
+If you use this software in your research, please cite:
+
+```
+[Citation information to be added]
+```

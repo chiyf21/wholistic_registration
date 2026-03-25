@@ -29,6 +29,7 @@ X &\to \phi(X) = X_0' + \Delta X' \\
 \text{s.t. } X_0' &\in \Omega_{ref}
 \end{aligned}
 $$
+
 where \(X_0'\) is a initial mapping
 And we could rewrite the loss function as:
 
@@ -42,6 +43,7 @@ $$
 $$
 
 Then we have
+
 $$
 \begin{aligned}
    \frac {\partial L(\phi)}{\partial \Delta X_a'}&=2\frac{\partial I_{\text{ref}}(X'+\Delta X_a')}{\partial X}[I_{ref}(X'+\Delta X_a')-I_{mov}(X)+\frac{\partial I_{\text{ref}}(X'+\Delta X_a')}{\partial X} \Delta X_a']\\
@@ -49,6 +51,7 @@ $$
    &=0\
 \end{aligned}
 $$
+
 The format is the same as before, so we needn't to change the solution.
 
 
@@ -129,6 +132,13 @@ After constructing this reference-side mask, we rerun the registration step unde
 
 Once a new mapping is obtained, we compare it with the previous solution and accept it if it leads to a meaningful reduction in the overall error. The masking is then removed or relaxed, and the optimization continues in a standard refinement mode. Conceptually, this procedure allows the algorithm to iteratively identify and break out of locally stable but incorrect matches, without disrupting regions that are already well aligned.
 # Remained Question
+## 1.What is the true zRatio of the image? 
+From my current experiments, setting zRatio=1 yields good results. The true zRatio values I read from the anno and raw data are different (and the x and y ratios also seem to differ; did I read them incorrectly?).
+
+## 2.The distribition is quite different, and I'm not sure what the exact reason is.
+
+Now we use the histgram mapping to correct the pixels, but it depends on if we have the two sample shape images. Or we just use a simple transform from the sampe plane to correct all the pixels
+![result](images/Histgram.png)
 ## 1.What is the true zRatio of the image? 
 From my current experiments, setting zRatio=1 yields good results. The true zRatio values I read from the anno and raw data are different (and the x and y ratios also seem to differ; did I read them incorrectly?).
 

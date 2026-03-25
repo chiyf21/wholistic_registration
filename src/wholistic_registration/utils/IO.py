@@ -677,7 +677,6 @@ def downsample_nd2_to_tiff_folder(
         return out_path
     for i in range(T):
         frame_idx = frame_list[i]
-        #测试在外面可以吗
         # @delayed
         # def save_frame(frame_data, out_folder=output_folder, fidx=frame_idx, ch=channel):
         #     vol = frame_data.astype(dtype)
@@ -687,7 +686,7 @@ def downsample_nd2_to_tiff_folder(
         #     return out_path
 
         # tasks.append(save_frame(dask_data[i]))
-        # tasks.append(save_frame_outer(dask_data[i],output_folder,fidx=frame_idx,ch=channel,dtype = dtype))
+        tasks.append(save_frame_outer(dask_data[i],output_folder,fidx=frame_idx,ch=channel,dtype = dtype))
     if verbose:
         print(f"[INFO] Processing {T} frames with {n_workers} threads...")
     with ProgressBar():

@@ -682,18 +682,13 @@ def ComputeMask_v2(
     # Process each frame
     for i in range(len(ref_files)-1):
         print(f"Compute difference between {ref_files[i]} and {ref_files[i+1]} ")
-        
+    
         ref_pre = tifffile.imread(os.path.join(ref_dir,ref_files[i]))
         ref_post = tifffile.imread(os.path.join(ref_dir,ref_files[i+1]))
 
         mask_map,diff_map,rely_map = structural_difference_map(ref_pre,
                                         ref_post,
                                         )
-        # print("ref_pre.shape : ",ref_pre.shape)
-        # print("ref_post.shape: ",ref_post.shape)
-        # print("mask_map.shape: ",mask_map.shape)
-        # print("diff_map.shape: ",diff_map.shape)
-        # print("rely_map.shape: ",rely_map.shape)
         if isinstance(mask_map,np.ndarray):
             # Save downsampled mask
             IO.write_multichannel_volume_as_ome_tiff(
@@ -704,8 +699,6 @@ def ComputeMask_v2(
                 label='mask'
             )
         else:
-
-
             IO.write_multichannel_volume_as_ome_tiff(
                 volume=[ref_pre,ref_post,mask_map.get(),diff_map.get(),rely_map.get()],      # single channel
                 out_dir=out_dir,

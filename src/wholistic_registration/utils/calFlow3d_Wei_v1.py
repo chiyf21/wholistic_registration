@@ -759,3 +759,333 @@ def correctMotion(data_raw, motion_field):
         data_tran = np.asarray(data_tran)  # Already CPU array
 
     return data_tran
+
+
+######################################################################################################################
+## TO BE IMPROVED
+def getMapping(data_mov, data_ref, option, verbose=False):
+    option["mask_ref"] = cp.asarray(
+        option["mask_ref"], dtype=cp.float32
+    )  # Shape: (H, W, D)
+    # moving中的某些点扔出定义域，不去做映射
+    option["mask_mov"] = cp.asarray(
+        option["mask_mov"], dtype=cp.float32
+    )  # Shape: (H, W, D)
+    layer_num = option["layer"]  # Number of pyramid layers
+    iterNum = option["iter"]  # Number of iterations per layer
+    r = option["r"]  # Filter radius
+    zRatio_raw = option["zRatio"]  # Z-axis scaling ratio
+    zRatio_HR = option["zRatio_HR"]  # Z-axis scaling ratio for high-res reference
+    SZ = data_mov.shape  # Original image dimensions
+    SZ_HR = data_ref.shape
+    movRange=option['movRange']
+    for layer in range(layer_num, -1, -1):
+        if verbose:
+            print(f"starting layer {layer} out of {layer_num}")
+        x = int(SZ[0] / (2**layer))  # Downsampled width
+        y = int(SZ[1] / (2**layer))  # Downsampled height
+        z = SZ[2]  # Keep original depth
+        x_hr = int(SZ_HR[0] / (2**layer))  # Downsampled width
+        y_hr = int(SZ_HR[1] / (2**layer))  # Downsampled height
+        z_hr = SZ_HR[2]  # Keep original depth
+        data_mov_layer = imresize(
+            cp.asarray(data_mov), output_shape=(x, y, z)
+        )  # Shape: (x, y, z) # bicubic by default
+        data_reference_layer = imresize(
+            cp.asarray(data_ref), output_shape=(x_hr, y_hr, z_hr)
+        )  # Shape: (x_hr, y_hr, z_hr)
+        x, y, z = data_mov_layer.shape  # Updated dimensions for current level
+        zRatio = zRatio_raw / (2**layer)
+        zRatio_hr = zRatio_HR / (2**layer)
+        H_layer = generate_continuous_H_gpu(
+            data_reference_layer,
+            zRatio=1
+        )
+
+        # Initialize motion field for current layer
+        if layer == layer_num:  # If at the coarsest level
+            if "motion" in option and option["motion"] is not None:
+                # Use provided initial motion field
+                motion_current = cp.zeros(
+                    (x, y, z, 3), dtype=cp.float32
+                )  # Shape: (x, y, z, 3)
+                motion_init = cp.array(
+                    option["motion"], dtype=cp.float32
+                )  # Shape: (H, W, D, 3)
+                # Downsample and scale the initial motion field
+                motion_current[:, :, :, 0] = cp.asarray(
+                    imresize(motion_init[:, :, :, 0], output_shape=(x, y, z))
+                    / (SZ[0] / x)
+                )  # Scale x-component
+                motion_current[:, :, :, 1] = cp.asarray(
+                    imresize(motion_init[:, :, :, 1], output_shape=(x, y, z))
+                    / (SZ[1] / y)
+                )  # Scale y-component
+                motion_current[:, :, :, 2] = cp.asarray(
+                    imresize(motion_init[:, :, :, 2], output_shape=(x, y, z))
+                    / (SZ[2] / z)
+                )  # Scale z-component
+            else:
+                # Start with zero motion field
+                motion_current = cp.zeros(
+                    (x, y, z, 3), dtype=cp.float32
+                )  # Shape: (x, y, z, 3)
+
+        else:
+            # Upsample motion field from previous (finer) level
+            motion_current_temp = cp.asarray(
+                motion_current
+            )  # Shape: (prev_x, prev_y, prev_z, 3)
+            motion_current = cp.zeros(
+                (x, y, z, 3), dtype=cp.float32
+            )  # Shape: (x, y, z, 3)
+            # Upsample and scale motion components (x2 for x,y due to pyramid structure)
+            motion_current[:, :, :, 0] = cp.asarray(
+                imresize(
+                    motion_current_temp[:, :, :, 0],
+                    output_shape=(x, y, z),
+                    method="bilinear",
+                )
+                * 2
+            )  # Scale x-component
+            motion_current[:, :, :, 1] = cp.asarray(
+                imresize(
+                    motion_current_temp[:, :, :, 1],
+                    output_shape=(x, y, z),
+                    method="bilinear",
+                )
+                * 2
+            )  # Scale y-component
+            motion_current[:, :, :, 2] = cp.asarray(
+                imresize(
+                    motion_current_temp[:, :, :, 2],
+                    output_shape=(x, y, z),
+                    method="bilinear",
+                )
+            )  # Scale z-component
+            motion_current = cp.asarray(
+                motion_current, dtype=cp.float32
+            )  # Shape: (x, y, z, 3)
+
+        if "phase" in option and option["phase"] is not None:
+            phase_init=cp.array(
+                option["phase"], dtype=cp.float32
+            )
+            phase_current[:,:,:,0]=cp.asarray(
+                imresize(phase_init[:,:,:,0], output_shape=(x, y, z))
+                / (SZ[0] / x)
+            )  # Scale x-component
+            phase_current[:,:,:,1]=cp.asarray(
+                imresize(phase_init[:,:,:,1], output_shape=(x, y, z))
+                / (SZ[1] / y)
+            )  # Scale y-component
+            phase_current[:,:,:,2]=cp.asarray(
+                imresize(phase_init[:,:,:,2], output_shape=(x, y, z))
+                / (SZ[2] / z)
+            )  # Scale z-component
+        else:
+            X, Y, Z = cp.indices((x, y, z))
+            phase_current = cp.stack(
+                [X, Y, Z*zRatio/zRatio_hr], axis=-1
+            ).astype(cp.float32)
+        oldError = cp.inf * cp.ones(3)  # Shape: (3,) - track last 3 errors
+        smoothPenalty = option["smoothPenalty"]  # Smoothness penalty weight
+        patchConnectNum = (r * 2 + 1) ** 2  # Number of connected patches
+        smoothPenaltySum = smoothPenalty * patchConnectNum  # Total penalty weight
+        xG = cp.arange(r, x - 1, step=2 * r + 1)  # Control points in x direction
+        yG = cp.arange(r, y - 1, step=2 * r + 1)  # Control points in y direction
+        zG = cp.arange(0, z)  # All z positions
+        xG_grid, yG_grid, zG_grid = cp.meshgrid(
+            xG, yG, zG, indexing="ij"
+        )  # Shape: (len(xG), len(yG), len(zG))
+        for iter in range(iterNum):
+            old_motion = motion_current.copy()
+            # Apply current motion field to get warped moving image
+            phase_update = motion_current.copy()
+            ####### attention
+            phase_update[...,2] = phase_update[...,2]*zRatio_hr/zRatio
+            phase_new = phase_current + phase_update
+            data_mov_mapped= apply_H_to_matrix_gpu(phase_new,H_layer)
+            It = data_mov_layer - data_mov_mapped  # Shape: (x, y, z) # temporal difference
+            It = calculate.imfilter(
+                It, cp.ones((3, 3, 1)) / 9, "replicate", "same", "corr"
+            )  # Shape: (x, y, z)
+            # Compute neighbor motion differences for smoothness constraint
+            neiDiff = getNeiDiff(
+                motion_current[xG_grid, yG_grid, zG_grid, :], 1
+            )  # Shape: (len(xG), len(yG), len(zG), 3)
+            # Scale z-component by z-ratio to account for anisotropic voxels
+            # neiDiff[:, :, :, 2] = (
+            #     neiDiff[:, :, :, 2] * zRatio
+            # )  # Shape: (len(xG), len(yG), len(zG), 3)
+            neiSum = smoothPenaltySum * neiDiff 
+            diffError, penaltyError = calError(
+                It, neiDiff, smoothPenaltySum
+            )  # Both scalar values
+            currentError = diffError + penaltyError  # Total error
+            if verbose:
+                print(
+                    f"Downsample layer: {layer}\tIter: {iter}\tError: {currentError:.3f}, Diff Error: {diffError:.3f}, Penalty Error: {penaltyError:.3f}"
+                )
+            if iter == iterNum - 1:
+                if verbose:
+                    print("Reached the maximum number of iterations")
+                break
+            elif cp.sum(oldError <= currentError) > 1:
+                if verbose:
+                    print("Error increased for multiple iterations")
+                break
+            elif np.abs(oldError[-1] - currentError) < option["tol"]:
+                if verbose:
+                    print("Absolute difference between old and new error is less than 1e-3")
+                break
+            else:
+                # Update error history (shift and add new error)
+                oldError[:-1] = oldError[1:]  # Shift left
+                oldError[-1] = currentError  # Add new error
+            Ix, Iy, Iz = getSpatialGradientInOrgGrid(
+                data_reference_layer, phase_new
+            )  # Each shape: (x, y, z) # dimensionality of the data
+            Iz /= zRatio_hr
+            AverageFilter = cp.ones(
+                (r * 2 + 1, r * 2 + 1, 1)
+            )  # Shape: (2*r+1, 2*r+1, 1)
+            Ixx = calculate.imfilter(
+                Ix**2, AverageFilter, "replicate", "same", "corr"
+            )  # Shape: (x, y, z)
+            Ixy = calculate.imfilter(
+                Ix * Iy, AverageFilter, "replicate", "same", "corr"
+            )  # Shape: (x, y, z)
+            Ixz = calculate.imfilter(
+                Ix * Iz, AverageFilter, "replicate", "same", "corr"
+            )  # Shape: (x, y, z)
+            Iyy = calculate.imfilter(
+                Iy**2, AverageFilter, "replicate", "same", "corr"
+            )  # Shape: (x, y, z)
+            Iyz = calculate.imfilter(
+                Iy * Iz, AverageFilter, "replicate", "same", "corr"
+            )  # Shape: (x, y, z)
+            Izz = calculate.imfilter(
+                Iz**2, AverageFilter, "replicate", "same", "corr"
+            )  # Shape: (x, y, z)
+
+
+            #test the rank of the matrix
+            # for i in range(Ixx.shape[0]):
+            #     for j in range(Ixx.shape[1]):
+            #         for k in range(Ixx.shape[2]):
+            #             A=cp.array([[Ixx[i][j][k],Ixy[i][j][k],Ixz[i][j][k]],[Ixy[i][j][k],Iyy[i][j][k],Iyz[i][j][k]],[Ixz[i][j][k],Iyz[i][j][k],Izz[i][j][k]]])
+            #             print(f"layer:{layer}, iter:{iter} control point[{i},{j},{k}] eigenvalues of structure tensor:{cp.linalg.eigvalsh(A)}")
+
+            Ixt = calculate.imfilter(
+                Ix * It, AverageFilter, "replicate", "same", "corr"
+            )  # Shape: (x, y, z)
+            Iyt = calculate.imfilter(
+                Iy * It, AverageFilter, "replicate", "same", "corr"
+            )  # Shape: (x, y, z)
+            Izt = calculate.imfilter(
+                Iz * It, AverageFilter, "replicate", "same", "corr"
+            )  # Shape: (x, y, z)
+            Ixx = Ixx[xG_grid, yG_grid, zG_grid]  # Shape: (len(xG), len(yG), len(zG))
+            Ixy = Ixy[xG_grid, yG_grid, zG_grid]  # Shape: (len(xG), len(yG), len(zG))
+            Ixz = Ixz[xG_grid, yG_grid, zG_grid]  # Shape: (len(xG), len(yG), len(zG))
+            Iyy = Iyy[xG_grid, yG_grid, zG_grid]  # Shape: (len(xG), len(yG), len(zG))
+            Iyz = Iyz[xG_grid, yG_grid, zG_grid]  # Shape: (len(xG), len(yG), len(zG))
+            Izz = Izz[xG_grid, yG_grid, zG_grid]  # Shape: (len(xG), len(yG), len(zG))
+            Ixt = Ixt[xG_grid, yG_grid, zG_grid]  # Shape: (len(xG), len(yG), len(zG))
+            Iyt = Iyt[xG_grid, yG_grid, zG_grid]  # Shape: (len(xG), len(yG), len(zG))
+            Izt = Izt[xG_grid, yG_grid, zG_grid]  # Shape: (len(xG), len(yG), len(zG))
+            motion_update_normalized = getFlow3_withPenalty6(
+                Ixx, Ixy, Ixz, Iyy, Iyz, Izz, Ixt, Iyt, Izt, smoothPenaltySum, neiSum
+            )  # Shape: (len(xG), len(yG), len(zG), 3) # solve the linear system of equations
+            motion_update_dist = cp.sqrt(
+                cp.sum(motion_update_normalized**2, axis=3)
+            )  # Shape: (len(xG), len(yG), len(zG))
+            motion_update_dist = cp.maximum(
+                motion_update_dist / movRange, 1.0
+            )  # Shape: (len(xG), len(yG), len(zG))
+            motion_update_normalized = (
+                motion_update_normalized / motion_update_dist[..., cp.newaxis]
+            )  # Shape: (len(xG), len(yG), len(zG), 3)
+            motion_update = (
+                motion_update_normalized  # Shape: (len(xG), len(yG), len(zG), 3)
+            )
+            # motion_update[:, :, :, 2] = (
+            #     motion_update[:, :, :, 2]
+            # )  # Shape: (len(xG), len(yG), len(zG), 3)
+            motion_current_CP = (
+                motion_current[xG_grid, yG_grid, zG_grid, :] + motion_update
+            ) 
+            ######
+            grid = cp.meshgrid(
+                *[
+                    cp.arange(n, dtype=cp.float32) for n in data_mov_layer.shape
+                ],
+                indexing="ij",  
+                sparse=False, 
+            )  
+
+            coords_new = compute_new_grid(
+                grid, r, motion_current_CP.shape 
+            ) 
+            for dirNum in range(3):
+                temp_phi = cp.asarray(
+                    motion_current_CP[:, :, :, dirNum]
+                )  # Shape: (len(xG), len(yG), len(zG))
+                motion_current[:, :, :, dirNum] = interp.interp3Grid(
+                    temp_phi, coords_new
+                ).reshape(
+                    x, y, z
+                ) 
+            diff_motion = np.abs(motion_current - old_motion)
+            max_diff_motion = np.max(diff_motion)
+            if max_diff_motion < 1e-3:
+                break
+
+    phase_update = motion_current.copy()
+    ####### attention
+    phase_update[...,2] = phase_update[...,2]*zRatio_hr/zRatio
+    phase_new = phase_current + phase_update
+    data_mov_mapped= apply_H_to_matrix_gpu(phase_new,H_layer)
+    if hasattr(motion_current, "get"):
+        motion_current = cp.asnumpy(motion_current) 
+    else:
+        motion_current = np.asarray(motion_current) 
+    if hasattr(phase_new, "get"):
+        phase_new = cp.asnumpy(phase_new) 
+    else:
+        phase_new = np.asarray(phase_new)  
+    
+    return phase_new,motion_current, data_mov_mapped
+
+
+def generate_continuous_H_gpu(stack, zRatio):
+    """
+    stack: cp.ndarray, shape (X,Y,Z)
+    """
+    stack_gpu = cp.asarray(stack)
+
+    def H(coords_phys):
+        coords = cp.asarray(coords_phys)
+        coords_idx = coords.copy()
+        coords_idx[..., 0] = coords[..., 0] / zRatio
+        shape = coords_idx.shape
+        coords_flat = coords_idx.reshape(-1, 3).T
+        values = cupy_ndimage.map_coordinates(
+            stack_gpu, coords_flat, order=3, mode="nearest"
+        )
+        return values.reshape(*shape[:-1])
+
+    return H
+
+
+def apply_H_to_matrix_gpu(A, H):
+    """
+    A: cp.ndarray, shape (X,Y,Z,3)
+    H: 插值函数
+    """
+    coords = cp.asarray(A)
+    shape = coords.shape
+    coords_flat = coords.reshape(-1, 3)
+    R = H(coords_flat)
+    return R.reshape(shape[:-1])
