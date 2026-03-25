@@ -31,7 +31,11 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 from mpl_toolkits.mplot3d import Axes3D
+import numpy as np
+import matplotlib.pyplot as plt
+from ipywidgets import interact, IntSlider
 import os
+import plotly.graph_objects as go
 
 def auto_contrast(img, low_percentile=1, high_percentile=99):
     img = img.astype(np.float32)
@@ -72,35 +76,49 @@ def visualize_2d_image(image, cmap='gray', title='2D Image',threshold=None,autoc
         plt.show()
 
 
-def visualize_3d_image(image, slice_axis=2, slice_index=None, cmap='gray', title='3D Image Slice'):
+
+def visualize_3d_image(image, slice_axis=2, cmap='gray', title='3D Image Slice'):
     """
-    Visualizes a 3D image by displaying a slice along a given axis (x, y, or z).
-    
+    Interactive viewer for a 3D image stack using ipywidgets.
+
     Args:
-        image (ndarray): The 3D image (volume) to display.
-        slice_axis (int): The axis along which to slice the 3D image (0: x-axis, 1: y-axis, 2: z-axis).
-        slice_index (int): The index of the slice to display along the specified axis.
-        cmap (str): The colormap to use for visualization.
-        title (str): Title of the slice plot.
+        image (ndarray): 3D image, shape (D0, D1, D2)
+        slice_axis (int): axis to slice along (0, 1, or 2)
+        cmap (str): matplotlib colormap
+        title (str): plot title prefix
     """
-    if slice_index is None:
-        slice_index = image.shape[slice_axis] // 2  # Default to middle slice
-        
-    if slice_axis == 0:
-        image_slice = image[slice_index, :, :]
-    elif slice_axis == 1:
-        image_slice = image[:, slice_index, :]
-    elif slice_axis == 2:
-        image_slice = image[:, :, slice_index]
-    else:
-        raise ValueError("slice_axis must be 0 (x-axis), 1 (y-axis), or 2 (z-axis)")
-    
-    plt.figure(figsize=(8, 8))
-    plt.imshow(image_slice, cmap=cmap)
-    plt.title(f'{title} (Slice {slice_index})')
-    plt.axis('off')
-    plt.colorbar()
-    plt.show()
+    if image.ndim != 3:
+        raise ValueError("image must be a 3D ndarray")
+    if slice_axis not in [0, 1, 2]:
+        raise ValueError("slice_axis must be 0, 1, or 2")
+
+    max_index = image.shape[slice_axis] - 1
+
+    def _show_slice(slice_index):
+        if slice_axis == 0:
+            image_slice = image[slice_index, :, :]
+        elif slice_axis == 1:
+            image_slice = image[:, slice_index, :]
+        else:
+            image_slice = image[:, :, slice_index]
+
+        plt.figure(figsize=(6, 6))
+        plt.imshow(image_slice, cmap=cmap)
+        plt.title(f"{title} (axis={slice_axis}, slice={slice_index})")
+        plt.axis("off")
+        plt.colorbar()
+        plt.show()
+
+    interact(
+        _show_slice,
+        slice_index=IntSlider(
+            min=0,
+            max=max_index,
+            step=1,
+            value=max_index // 2,
+            description='Slice'
+        )
+    )
 
 def quivermotion_py(template, r, motion_field, save_path=None, file_name=None):
     """
@@ -140,4 +158,249 @@ def quivermotion_py(template, r, motion_field, save_path=None, file_name=None):
         plt.savefig(save_file, dpi=300, bbox_inches='tight')
         print(f"✅ Saved to: {save_file}")
 
+    plt.show()
+    
+def plot_deformed_grid_plotly(
+    phase=None,
+    motion=None,
+    z0=None,
+    step=20,
+    scale_z=1.0,
+    spacing=(1.0, 1.0, 1.0),
+    xlim=None,
+    ylim=None,
+    zlim=None,
+    upsample=1,
+    interp_order=3,
+    smooth_sigma=0.0,
+    show_surface=False,
+    surface_opacity=0.35,
+    line_width=3,
+    title="Deformed grid in 3D",
+    return_fig=False
+):
+    """
+    Visualize a deformed 2D plane as a 3D wireframe/surface using Plotly.
+
+    Parameters
+    ----------
+    phase : ndarray, optional
+        Shape (H, W, 3). Direct mapping coordinates:
+            phase[..., 0] = mapped X
+            phase[..., 1] = mapped Y
+            phase[..., 2] = mapped Z
+
+    motion : ndarray, optional
+        Shape (H, W, 3). Displacement field:
+            motion[..., 0] = dX
+            motion[..., 1] = dY
+            motion[..., 2] = dZ
+
+    z0 : float, optional
+        Initial plane z coordinate when using motion input.
+
+    step : int
+        Grid interval for plotting lines. Smaller -> denser grid.
+
+    scale_z : float
+        Additional visualization scaling for z axis only.
+        If you want x/y/z to represent the same unit, keep scale_z=1.0.
+
+    spacing : tuple of 3 floats
+        Physical spacing for (x, y, z), e.g. (sx, sy, sz).
+        Final plotted coordinates are:
+            Xplot = Xmap * sx
+            Yplot = Ymap * sy
+            Zplot = Zmap * sz * scale_z
+
+    xlim, ylim, zlim : tuple or None
+        Axis display ranges, e.g. xlim=(0, 500)
+
+    upsample : int
+        Interpolation factor for denser/smoother visualization.
+        upsample=1 means no upsampling.
+
+    interp_order : int
+        Interpolation order used by scipy.ndimage.zoom.
+        Common values:
+            1 = linear
+            3 = cubic
+
+    smooth_sigma : float
+        Gaussian smoothing sigma applied to X/Y/Z maps before plotting.
+        0 means no smoothing.
+
+    show_surface : bool
+        Whether to overlay a semi-transparent surface.
+
+    surface_opacity : float
+        Opacity of the surface if show_surface=True.
+
+    line_width : float
+        Width of wireframe lines.
+
+    title : str
+        Figure title.
+
+    return_fig : bool
+        If True, return the Plotly figure object.
+
+    Returns
+    -------
+    fig : plotly.graph_objects.Figure, optional
+        Returned only if return_fig=True.
+    """
+
+    # -----------------------------
+    # 1) Build Xmap, Ymap, Zmap
+    # -----------------------------
+    if phase is None:
+        if motion is None or z0 is None:
+            raise ValueError("Provide either phase, or motion together with z0.")
+
+        motion = np.asarray(motion)
+        if motion.ndim != 3 or motion.shape[2] < 3:
+            raise ValueError("motion must have shape (H, W, 3).")
+
+        H, W, _ = motion.shape
+
+        # 注意：这里用 indexing='ij'，避免 x/y 和数组行列语义混乱
+        xx, yy = np.meshgrid(np.arange(H), np.arange(W), indexing='ij')
+
+        Xmap = xx + motion[:, :, 0]
+        Ymap = yy + motion[:, :, 1]
+        Zmap = z0 + motion[:, :, 2]
+
+    else:
+        phase = np.asarray(phase)
+        if phase.ndim != 3 or phase.shape[2] < 3:
+            raise ValueError("phase must have shape (H, W, 3).")
+
+        Xmap = phase[:, :, 0]
+        Ymap = phase[:, :, 1]
+        Zmap = phase[:, :, 2]
+        H, W = Xmap.shape
+
+    # -----------------------------
+    # 2) Optional smoothing
+    # -----------------------------
+    if smooth_sigma is not None and smooth_sigma > 0:
+        Xmap = gaussian_filter(Xmap, sigma=smooth_sigma)
+        Ymap = gaussian_filter(Ymap, sigma=smooth_sigma)
+        Zmap = gaussian_filter(Zmap, sigma=smooth_sigma)
+
+    # -----------------------------
+    # 3) Optional upsampling
+    # -----------------------------
+    if upsample is not None and upsample > 1:
+        Xmap = zoom(Xmap, upsample, order=interp_order)
+        Ymap = zoom(Ymap, upsample, order=interp_order)
+        Zmap = zoom(Zmap, upsample, order=interp_order)
+
+    # Updated size after upsampling
+    H2, W2 = Xmap.shape
+
+    # -----------------------------
+    # 4) Apply physical spacing
+    # -----------------------------
+    sx, sy, sz = spacing
+
+    Xplot = Xmap * sx
+    Yplot = Ymap * sy
+    Zplot = Zmap * sz * scale_z
+
+    # -----------------------------
+    # 5) Create figure
+    # -----------------------------
+    fig = go.Figure()
+
+    # Optional surface
+    if show_surface:
+        fig.add_trace(go.Surface(
+            x=Xplot,
+            y=Yplot,
+            z=Zplot,
+            opacity=surface_opacity,
+            showscale=False
+        ))
+
+    # Horizontal lines
+    for i in range(0, H2, step):
+        fig.add_trace(go.Scatter3d(
+            x=Xplot[i, :],
+            y=Yplot[i, :],
+            z=Zplot[i, :],
+            mode='lines',
+            line=dict(width=line_width),
+            showlegend=False
+        ))
+
+    # Vertical lines
+    for j in range(0, W2, step):
+        fig.add_trace(go.Scatter3d(
+            x=Xplot[:, j],
+            y=Yplot[:, j],
+            z=Zplot[:, j],
+            mode='lines',
+            line=dict(width=line_width),
+            showlegend=False
+        ))
+
+    # -----------------------------
+    # 6) Axis settings
+    # -----------------------------
+    xaxis_dict = dict(title='Ref X')
+    yaxis_dict = dict(title='Ref Y')
+    zaxis_dict = dict(title='Ref Z')
+
+    if xlim is not None:
+        xaxis_dict["range"] = list(xlim)
+    if ylim is not None:
+        yaxis_dict["range"] = list(ylim)
+    if zlim is not None:
+        zaxis_dict["range"] = list(zlim)
+
+    fig.update_layout(
+        scene=dict(
+            xaxis=xaxis_dict,
+            yaxis=yaxis_dict,
+            zaxis=zaxis_dict,
+            aspectmode='data' 
+        ),
+        title=title
+    )
+
+    fig.show()
+
+    if return_fig:
+        return fig
+    
+
+def plot_sequence(sequence, title='Sequence Plot', xlabel='Index', ylabel='Value',
+                  marker=None, figsize=(8, 4)):
+    """
+    Plot a 1D sequence as a line chart.
+
+    Args:
+        sequence: 1D list / tuple / numpy array
+        title (str): figure title
+        xlabel (str): x-axis label
+        ylabel (str): y-axis label
+        marker (str or None): marker style, e.g. 'o', '.', None
+        figsize (tuple): figure size
+    """
+    seq = np.asarray(sequence)
+
+    if seq.ndim != 1:
+        raise ValueError(f"sequence must be 1D, but got shape={seq.shape}")
+
+    x = np.arange(len(seq))
+
+    plt.figure(figsize=figsize)
+    plt.plot(x, seq, marker=marker)
+    plt.title(title)
+    plt.xlabel(xlabel)
+    plt.ylabel(ylabel)
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
     plt.show()

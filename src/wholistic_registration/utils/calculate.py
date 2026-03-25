@@ -89,3 +89,52 @@ def getDet2(A, B, C, D):
         cupy.ndarray: The determinant of the 2x2 matrix.
     """
     return A * D - B * C
+
+def to_2d(arr):
+    arr = cp.asarray(arr, dtype=cp.float32)
+    if arr.ndim == 3 and arr.shape[2] == 1:
+        arr = arr[:, :, 0]
+    if arr.ndim != 2:
+        raise ValueError(f"data_mov must be 2D or (H,W,1), got shape {arr.shape}")
+    return arr
+
+
+def to_3d(arr):
+    arr = cp.asarray(arr, dtype=cp.float32)
+    if arr.ndim != 3:
+        raise ValueError(f"data_ref must be 3D (H,W,Z), got shape {arr.shape}")
+    return arr
+
+
+def grad_mag_2d(img):
+    gx = cupy_ndimage.sobel(img, axis=1, mode="nearest")
+    gy = cupy_ndimage.sobel(img, axis=0, mode="nearest")
+    return cp.sqrt(gx * gx + gy * gy).astype(cp.float32)
+
+
+def hann2d(h, w):
+    wy = cp.hanning(h) if h > 1 else cp.ones(1, dtype=cp.float32)
+    wx = cp.hanning(w) if w > 1 else cp.ones(1, dtype=cp.float32)
+    win = cp.outer(wy, wx).astype(cp.float32)
+    win = cp.maximum(win, 1e-3)  # 防止边界全零
+    return win
+
+
+def zncc(a, b, weight=None, eps=1e-8):
+    a = a.astype(cp.float32, copy=False)
+    b = b.astype(cp.float32, copy=False)
+
+    if weight is None:
+        a0 = a - a.mean()
+        b0 = b - b.mean()
+        denom = cp.sqrt((a0 * a0).sum() * (b0 * b0).sum()) + eps
+        return float((a0 * b0).sum() / denom)
+
+    w = weight.astype(cp.float32, copy=False)
+    ws = w.sum() + eps
+    ma = (w * a).sum() / ws
+    mb = (w * b).sum() / ws
+    a0 = a - ma
+    b0 = b - mb
+    denom = cp.sqrt((w * a0 * a0).sum() * (w * b0 * b0).sum()) + eps
+    return float((w * a0 * b0).sum() / denom)
