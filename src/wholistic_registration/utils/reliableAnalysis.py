@@ -449,7 +449,7 @@ def structural_difference_map(
     # Use minimum — only trust difference where BOTH images have structure.
     # np.maximum would flag background regions where only one image has structure,
     # producing false positives from intensity differences unrelated to misregistration.
-    R = np.minimum(R_ref, R_mov)
+    R = np.maximum(R_ref, R_mov) # minimum?...
     I_mov_corr = photometric_align_hist(
         I_ref,
         I_mov
