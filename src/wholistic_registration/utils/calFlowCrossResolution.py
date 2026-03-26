@@ -829,7 +829,8 @@ def detect_significant_mad(values, threshold=3.0):
         idx = cp.where(z > threshold)[0]
 
     return idx.astype(cp.int64)
-import cupy as cp
+
+# FIX: removed duplicate `import cupy as cp` — cp is already imported via `from . import cp`
 import cupyx.scipy.ndimage as ndi
 
 
