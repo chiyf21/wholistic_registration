@@ -452,19 +452,21 @@ def downsample_tiff_series(tiff_folder_or_list, xy_down=4, batch_processing=Fals
                                                   final_result.shape[3]//2, 
                                                   final_result.shape[4]//2))
 
-def reset_dir(path):
+def reset_dir(path, force=False):
+    # FIX: added `force` flag (default False) so callers can reset without blocking
+    # on interactive input. The old version used input() which breaks automated pipelines.
     if os.path.exists(path):
-        ans = input(f"Directory '{path}' exists. Delete it? [y/N]: ").strip().lower()
-        if ans in ["y", "yes"]:
-            confirm = input("This will permanently delete the directory. Continue? [y/N]: ").strip().lower()
-            if confirm in ["y", "yes"]:
+        if force:
+            shutil.rmtree(path)
+            os.makedirs(path)
+        else:
+            ans = input(f"Directory '{path}' exists. Delete it? [y/N]: ").strip().lower()
+            if ans in ["y", "yes"]:
                 shutil.rmtree(path)
                 os.makedirs(path)
                 print("Directory reset.")
             else:
-                print("Cancelled.")
-        else:
-            print("Cancelled.")
+                print("Skipped.")
     else:
         os.makedirs(path)
 def downsample_tifs_dask(input_folder, output_folder, downsample_xy=4, downsample_t=1, n_workers=4,verbose=True):
@@ -666,6 +668,8 @@ def downsample_nd2_to_tiff_folder(
         ]
         if verbose:
             print(f"[INFO] After slicing/downsample: {dask_data.shape}")
+
+    
     tasks = []
     T = dask_data.shape[0]
     @delayed
@@ -675,18 +679,10 @@ def downsample_nd2_to_tiff_folder(
         out_path = os.path.join(out_folder, out_name)
         tifffile.imwrite(out_path, vol, imagej=True)
         return out_path
+    # FIX: removed dead commented-out save_frame closure that was superseded by save_frame_outer
     for i in range(T):
         frame_idx = frame_list[i]
-        # @delayed
-        # def save_frame(frame_data, out_folder=output_folder, fidx=frame_idx, ch=channel):
-        #     vol = frame_data.astype(dtype)
-        #     out_name = f"vol_ch{ch}_downsample_{fidx:06d}.tif"
-        #     out_path = os.path.join(out_folder, out_name)
-        #     tifffile.imwrite(out_path, vol, imagej=True)
-        #     return out_path
-
-        # tasks.append(save_frame(dask_data[i]))
-        tasks.append(save_frame_outer(dask_data[i],output_folder,fidx=frame_idx,ch=channel,dtype = dtype))
+        tasks.append(save_frame_outer(dask_data[i], output_folder, fidx=frame_idx, ch=channel, dtype=dtype))
     if verbose:
         print(f"[INFO] Processing {T} frames with {n_workers} threads...")
     with ProgressBar():
@@ -734,8 +730,14 @@ def saveTiff(image_list, config_path, save_path):
         bigtiff=True
     )
 
-def saveTiff_new(image, save_path, config_path =None, metadata = None, verbose=True):
-    # check dimension of image - should always by TZCYX
+def saveTiff_new(image, save_path, config_path=None, metadata=None, verbose=True):
+    """
+    Save 5D (TZCYX) image as ImageJ-compatible TIFF.
+
+    Note: unlike saveTiff(), this stores config_path as a string in the TIFF
+    description field (not the serialized JSON contents). Use readTiff() to
+    retrieve the path, then load the config separately with toml.load().
+    """
     if image.ndim == 2:
         image = image[None, None, None, :, :]
     if image.ndim != 5:
@@ -864,15 +866,16 @@ def saveZarr_fast(mem_data, ca_data, reference, config_path, save_path,
     print(f"  - calcium : {ca_data.shape}")
     print(f"  - reference: {reference.shape}")
                       
-def readTifff(tiff_path):
-    #haven't tested
+# FIX: renamed from readTifff (triple-f typo) to readTiff
+def readTiff(tiff_path):
     with tifffile.TiffFile(tiff_path) as tif:
         images = tif.asarray()
-        # description
         desc = tif.pages[0].tags.get("ImageDescription")
         if desc is not None:
             desc = desc.value
     return images, desc
+
+
 
 def write_volume_as_ome_tiff(volume, out_dir, ch_idx, frame_idx, configPath,
                              spacing_x=1.0, spacing_y=1.0):
