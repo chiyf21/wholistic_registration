@@ -139,13 +139,6 @@ From my current experiments, setting zRatio=1 yields good results. The true zRat
 
 Now we use the histgram mapping to correct the pixels, but it depends on if we have the two sample shape images. Or we just use a simple transform from the sampe plane to correct all the pixels
 ![result](images/Histgram.png)
-## 1.What is the true zRatio of the image? 
-From my current experiments, setting zRatio=1 yields good results. The true zRatio values I read from the anno and raw data are different (and the x and y ratios also seem to differ; did I read them incorrectly?).
-
-## 2.The distribition is quite different, and I'm not sure what the exact reason is.
-
-Now we use the histgram mapping to correct the pixels, but it depends on if we have the two sample shape images. Or we just use a simple transform from the sampe plane to correct all the pixels
-![result](images/Histgram.png)
 
 ## 3.What I find strange from a biological perspective
 

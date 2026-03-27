@@ -106,6 +106,8 @@ def compute_reference_from_block(mem_block,config,ca_block = None):
             Ca_ref = cp.mean(ca_block[indsort, :], axis=0)
             Ca_ref_transform =transform(Ca_ref,k,function)
             result = mem_ref + Ca_ref_transform
+        else:
+            result = mem_ref
     else:
         result = mem_ref
     
