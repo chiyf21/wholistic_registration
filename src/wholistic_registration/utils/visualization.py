@@ -27,15 +27,13 @@ Usage:
         visualization.overlay_motion_on_2d(img_2d, motion_field)
 """
 
+# FIX: removed duplicate numpy/matplotlib imports and unused Axes3D import.
+# Made plotly and ipywidgets lazy imports so the module doesn't fail if they
+# aren't installed (they're only needed by specific functions).
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
-from mpl_toolkits.mplot3d import Axes3D
-import numpy as np
-import matplotlib.pyplot as plt
-from ipywidgets import interact, IntSlider
 import os
-import plotly.graph_objects as go
 
 def auto_contrast(img, low_percentile=1, high_percentile=99):
     img = img.astype(np.float32)
@@ -87,6 +85,8 @@ def visualize_3d_image(image, slice_axis=2, cmap='gray', title='3D Image Slice')
         cmap (str): matplotlib colormap
         title (str): plot title prefix
     """
+    from ipywidgets import interact, IntSlider
+
     if image.ndim != 3:
         raise ValueError("image must be a 3D ndarray")
     if slice_axis not in [0, 1, 2]:
@@ -251,9 +251,9 @@ def plot_deformed_grid_plotly(
         Returned only if return_fig=True.
     """
 
-    # -----------------------------
-    # 1) Build Xmap, Ymap, Zmap
-    # -----------------------------
+    import plotly.graph_objects as go
+    from scipy.ndimage import zoom, gaussian_filter
+
     if phase is None:
         if motion is None or z0 is None:
             raise ValueError("Provide either phase, or motion together with z0.")
@@ -264,7 +264,7 @@ def plot_deformed_grid_plotly(
 
         H, W, _ = motion.shape
 
-        # 注意：这里用 indexing='ij'，避免 x/y 和数组行列语义混乱
+        # FIX: translated Chinese comment — use indexing='ij' to align x/y with array row/col semantics
         xx, yy = np.meshgrid(np.arange(H), np.arange(W), indexing='ij')
 
         Xmap = xx + motion[:, :, 0]

@@ -116,7 +116,8 @@ def hann2d(h, w):
     wy = cp.hanning(h) if h > 1 else cp.ones(1, dtype=cp.float32)
     wx = cp.hanning(w) if w > 1 else cp.ones(1, dtype=cp.float32)
     win = cp.outer(wy, wx).astype(cp.float32)
-    win = cp.maximum(win, 1e-3)  
+    # FIX: translated Chinese comment — clamp to prevent all-zero boundaries
+    win = cp.maximum(win, 1e-3)
     return win
 
 

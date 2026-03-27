@@ -23,11 +23,11 @@ def DefineParams(
                 function='raw',
                 k=0.,
                 batch_size=100,
-                time_measurement='minute',
-                mid_window_size=100,
-                window_size=1,
+                time_measurement='minute', # frame
+                mid_window_size=100, # this can be in minutes or frames (depends on time_measurement)
+                window_size=1, # this can be in minutes or frames (depends on time_measurement)
                 mid_stride=10,
-                reference_chunk=1,
+                reference_chunk=1, # this can be in minutes or frames (depends on time_measurement)
                 preprocess=False,
                 thresFactor=5,
                 maskRange=[5,4000],
@@ -1501,8 +1501,8 @@ def process_directional_chunks(
         )
 
         #renew the windows:
-        ref_windows_mem=[]
-        ref_windows_ca=[]
+        ref_windows_mem.clear()
+        ref_windows_ca.clear()
         
         if save_ref:
             if direction == 'forward':

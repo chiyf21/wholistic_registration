@@ -3,9 +3,21 @@
 ### Priorities
 
 
+260225
+- Change downsample function to be more efficient [move @delayed outside the loop]
+- in the reliability mask, change the p60 
+
+
+260206
+- Change downsample function to be more efficient [move @delayed outside the loop]
+- For the reliability mask, what does the transform look like? 
+- Two metrics: one to reject regions that are definitely poorly region, two - regions where we can't tell 
+
+
+
 260130
 - Check single channel works
-- Check timewindow option words
+- Check timewindow option words (the pipeline already output)
 - Change downsample function to be more efficient - modularize - downsample each channel independently
 - Run reliability mask on f2013 - check the mask for false positives and false negatives?
 - Make Fiji macro (I can do this) to load data as multiple color channels

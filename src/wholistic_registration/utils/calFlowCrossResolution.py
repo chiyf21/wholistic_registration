@@ -760,9 +760,9 @@ def correctMotion(data_raw, motion_field):
 
     return data_tran
 
-# =========================================================
-# 1. Wrong-region detection helpers
 
+
+# 1. Wrong-region detection helpers
 def get_local_error_on_control_points(It, xG_grid, yG_grid, zG_grid,
                                       kernelsize=11, metric="mse"):
     """
@@ -821,6 +821,10 @@ def detect_significant_mad(values, threshold=3.0):
         idx = cp.where(z > threshold)[0]
 
     return idx.astype(cp.int64)
+
+# FIX: removed duplicate `import cupy as cp` — cp is already imported via `from . import cp`
+import cupyx.scipy.ndimage as ndi
+
 
 def _get_layer_shape_and_spacing(SZ, SZ_HR, layer, zRatio_raw, zRatio_HR, pyramid_mode="xy_only"):
     scale_xy = 2 ** layer
@@ -915,9 +919,7 @@ def build_reference_trap_mask_from_bad_moving(
     if not cp.any(bad_mask):
         return trap_mask_ref
 
-    # --------------------------------------------------
     # 1) reference gradients
-    # --------------------------------------------------
     ref_sm = cupy_ndimage.gaussian_filter(data_ref_layer.astype(cp.float32), sigma=(sigma_grad, sigma_grad, sigma_grad))
     gx = cupy_ndimage.sobel(ref_sm, axis=0) / 8.0
     gy = cupy_ndimage.sobel(ref_sm, axis=1) / 8.0
@@ -926,9 +928,7 @@ def build_reference_trap_mask_from_bad_moving(
 
     gx, gy, gz = _normalize_vec_field(gx, gy, gz)
 
-    # --------------------------------------------------
     # 2) seeds from bad moving voxels -> reference coords
-    # --------------------------------------------------
     seed_coords = phase_new[bad_mask]   # (N, 3)
     if seed_coords.shape[0] == 0:
         return trap_mask_ref
@@ -949,7 +949,7 @@ def build_reference_trap_mask_from_bad_moving(
     if seed_x.size == 0:
         return trap_mask_ref
 
-    # 去重
+    
     seed_lin = seed_x * (y_ref * z_ref) + seed_y * z_ref + seed_z
     seed_lin = cp.unique(seed_lin)
     seed_x = seed_lin // (y_ref * z_ref)
@@ -957,9 +957,7 @@ def build_reference_trap_mask_from_bad_moving(
     seed_y = rem // z_ref
     seed_z = rem % z_ref
 
-    # --------------------------------------------------
     # 3) local structure-aware growth around each seed
-    # --------------------------------------------------
     for i in range(seed_x.size):
         cx = int(seed_x[i])
         cy = int(seed_y[i])
@@ -1012,7 +1010,6 @@ def build_reference_trap_mask_from_bad_moving(
         # 3) distance not too large
         local_mask = (sim_I > cp.exp(-0.5)) & (cos_sim > cos_thresh)
 
-        # 再加一个距离衰减限制，避免无界扩散
         local_mask = local_mask & (d2 <= (grow_radius_xy ** 2))
 
         trap_mask_ref[x0:x1, y0:y1, z0:z1] |= local_mask

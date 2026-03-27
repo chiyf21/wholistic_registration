@@ -154,6 +154,7 @@ def local_mind_difference(
     structure_tau=0.6,
     structure_beta=0.05,
     eps=1e-6,
+    debug_dir=None,
 ):
     """
     GPU MIND-based local misalignment map with explicit masking of background.
@@ -164,6 +165,12 @@ def local_mind_difference(
         - completely ignores areas with no structure
 
     Supports 2D or 3D (slice-wise) images.
+
+    Parameters
+    ----------
+    debug_dir : str or None
+        If set, save intermediate results (M_ref, diff, weight, diff_weighted)
+        as TIFF files in this directory.
     """
 
     # ---------------------------
@@ -207,38 +214,10 @@ def local_mind_difference(
     
     def _mind_diff_2d(Ir, Im):
         M_ref = _mind_descriptor_2d(Ir)
-        import tifffile
-        tifffile.imwrite(f"/home/cyf/wbi/Virginia/registrated_data/f2013/M_ref.tif", M_ref.get())
         M_mov = _mind_descriptor_2d(Im)
-        
-        diff = cp.abs(cp.mean(M_ref - M_mov, axis=0))        
-        tifffile.imwrite(f"/home/cyf/wbi/Virginia/registrated_data/f2013/diff_raw.tif", diff.get())
-        ###############################################
-        # num = cp.linalg.norm(M_ref - M_mov, axis=0)
-        # den = cp.linalg.norm(M_mov, axis=0) + eps
-        # diff = num / den
-        # diff = cp.clip(diff, 0.0, 1.0)
-        ################################################
-        # num = cp.sum(M_ref * M_mov, axis=0)
-        # den = cp.linalg.norm(M_ref, axis=0) * cp.linalg.norm(M_mov, axis=0) + eps
-        # diff_cos = 1.0 - num / den
-        ################################################
-        # delta = cp.abs(M_ref-M_mov)
-        # mean = cp.mean(delta, axis=0)
-        # std = cp.std(delta, axis=0) + eps
-        # diff = mean/std
-        # # region aggregation
-        # diff = cupy_ndimage.gaussian_filter(diff_cos, sigma=patch_sigma)
 
-        # structure-gated
+        diff = cp.abs(cp.mean(M_ref - M_mov, axis=0))
 
-        # # 保存diff为png
-        # import tifffile
-        # tifffile.imwrite("/home/cyf/wbi/Virginia/registrated_data/f2013/diff_map.tif", diff.get())
-        
-        # ---------------------------
-        # soft structure weighting
-        # ---------------------------
         structure_mov = cp.mean(M_mov, axis=0)
         structure_mov = cupy_ndimage.gaussian_filter(structure_mov, sigma=patch_sigma)
         weight_mov = _soft_structure_weight(
@@ -250,12 +229,17 @@ def local_mind_difference(
             structure_ref, structure_tau, structure_beta
         )
         weight = cp.maximum(weight_ref, weight_mov)
-        # import tifffile
-        tifffile.imwrite("/home/cyf/wbi/Virginia/registrated_data/f2013/weight_map.tif",weight.get())
-        # weight = structure > 0.1
 
-        diff = diff * weight    
-        tifffile.imwrite(f"/home/cyf/wbi/Virginia/registrated_data/f2013/diff_weighted.tif", diff.get())
+        diff = diff * weight
+
+        if debug_dir is not None:
+            os.makedirs(debug_dir, exist_ok=True)
+            tifffile.imwrite(os.path.join(debug_dir, "M_ref.tif"), M_ref.get())
+            tifffile.imwrite(os.path.join(debug_dir, "diff_raw.tif"),
+                             cp.abs(cp.mean(M_ref - M_mov, axis=0)).get())
+            tifffile.imwrite(os.path.join(debug_dir, "weight_map.tif"), weight.get())
+            tifffile.imwrite(os.path.join(debug_dir, "diff_weighted.tif"), diff.get())
+
         return cp.clip(diff, 0.0, 1.0)
 
     # ---------------------------
@@ -288,8 +272,18 @@ def local_zscore_difference(
     eps=1e-6,
     p_mu=20,
     p_var=40,
-    clip=(0,10)
+    clip=(0,10),
+    debug_dir=None,
 ):
+    """
+    Local z-score based difference map between reference and moving images.
+
+    Parameters
+    ----------
+    debug_dir : str or None
+        If set, save intermediate results (var_ref, mask_ref, mask_mov, mask)
+        as TIFF files in this directory.
+    """
     I_ref = I_ref.astype(np.float32)
     I_mov = I_mov.astype(np.float32)
 
@@ -298,26 +292,28 @@ def local_zscore_difference(
 
     var_ref = gaussian_filter(I_ref**2, sigma=sigma) - mu_ref**2
     var_mov = gaussian_filter(I_mov**2, sigma=sigma) - mu_mov**2
-    import tifffile
-    tifffile.imwrite("/home/cyf/wbi/Virginia/registrated_data/f2013/var_ref.tif", var_ref)
-    # import tifffile 
+
     threshold_mu_ref = np.percentile(mu_ref, p_mu)
     threshold_var_ref = np.percentile(var_ref, p_var)
     mask_ref = (mu_ref>threshold_mu_ref) & (var_ref>threshold_var_ref)
-    # tifffile.imwrite("/home/cyf/wbi/Virginia/registrated_data/f2013/mask_ref.tif", mask_ref)
     threshold_mu_mov = np.percentile(mu_mov, p_mu)
     threshold_var_mov = np.percentile(var_mov, p_var)
     mask_mov = (mu_mov>threshold_mu_mov) & (var_mov>threshold_var_mov)
-    # tifffile.imwrite("/home/cyf/wbi/Virginia/registrated_data/f2013/mask_mov.tif", mask_mov)
     mask = mask_ref | mask_mov
-    # import tifffile 
-    # tifffile.imwrite("/home/cyf/wbi/Virginia/registrated_data/f2013/mask.tif", mask)
+
+    if debug_dir is not None:
+        os.makedirs(debug_dir, exist_ok=True)
+        tifffile.imwrite(os.path.join(debug_dir, "var_ref.tif"), var_ref)
+        tifffile.imwrite(os.path.join(debug_dir, "mask_ref.tif"), mask_ref.astype(np.uint8))
+        tifffile.imwrite(os.path.join(debug_dir, "mask_mov.tif"), mask_mov.astype(np.uint8))
+        tifffile.imwrite(os.path.join(debug_dir, "mask.tif"), mask.astype(np.uint8))
+
     denom = np.sqrt(var_ref + var_mov) + eps
 
-    D = np.abs(mu_ref - mu_mov) / denom *mask
+    D = np.abs(mu_ref - mu_mov) / denom * mask
     if clip is not None:
         D = np.clip(D, clip[0], clip[1])
-    D = (D / (clip[1] - clip[0]))  # normalize to [0,1]
+    D = (D / (clip[1] - clip[0]))
     return D.astype(np.float32)
 
 # pre version
@@ -434,23 +430,26 @@ def structural_difference_map(
     sigma_structure=4.0,
     sigma_reliability=1.5,
     r_threshold=0.2,
+    debug_dir=None,
 ):
+    """
+    Compute a structure-weighted difference map between reference and moving images.
 
+    Parameters
+    ----------
+    debug_dir : str or None
+        If set, save intermediate results (R, diff, D) as TIFF files in this directory.
+    """
     I_ref = I_ref.astype(np.float32)
     I_mov = I_mov.astype(np.float32)
 
     R_ref = reliability_map_v2(I_ref, sigma=sigma_reliability)
     R_mov = reliability_map_v2(I_mov, sigma=sigma_reliability)
 
-    R = np.maximum(R_ref, R_mov) ##minumum?
-    # import tifffile
-    # tifffile.imwrite("/home/cyf/wbi/Virginia/registrated_data/f2013/R.tif", R)
-    # I_mov_corr = photometric_align_robust(
-    #     I_ref,
-    #     I_mov,
-    #     R,
-    #     r_threshold=r_threshold
-    # )
+    # Use minimum — only trust difference where BOTH images have structure.
+    # np.maximum would flag background regions where only one image has structure,
+    # producing false positives from intensity differences unrelated to misregistration.
+    R = np.maximum(R_ref, R_mov) # minimum?...
     I_mov_corr = photometric_align_hist(
         I_ref,
         I_mov
@@ -474,17 +473,17 @@ def structural_difference_map(
         scale = np.percentile(valid_vals, 99)
     else:
         scale = np.percentile(diff, 99)
-    # noise_scale = np.percentile(valid_vals,70) + eps
 
-    # if noise_scale < eps:
-    #     noise_scale = eps
-    # tifffile.imwrite("/home/cyf/wbi/Virginia/registrated_data/f2013/diff.tif", diff)
     Z = diff / scale
     D = 1.0 - np.exp(-Z**2)
-    # import tifffile
-    # tifffile.imwrite("/home/cyf/wbi/Virginia/registrated_data/f2013/D.tif", D)
 
     D_final = D * R
+
+    if debug_dir is not None:
+        os.makedirs(debug_dir, exist_ok=True)
+        tifffile.imwrite(os.path.join(debug_dir, "R_reliability.tif"), R)
+        tifffile.imwrite(os.path.join(debug_dir, "diff_raw.tif"), diff)
+        tifffile.imwrite(os.path.join(debug_dir, "D_difference.tif"), D)
 
     return D_final.astype(np.float32), D.astype(np.float32), R.astype(np.float32)
 
