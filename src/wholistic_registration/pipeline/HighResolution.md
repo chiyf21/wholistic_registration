@@ -270,7 +270,7 @@ $$
 
 aggregate it over each control point's patch (`get_local_error_on_control_points`), then flag outlier control points using MAD (median absolute deviation) thresholding (`detect_significant_mad`). Connected components of flagged control points are expanded to a dense bad-region mask (`build_bad_region_mask_from_cp_error`).
 
-Optionally (mode `"highresidual"`), within these bad regions only the voxels with the *lowest* residual are selected — these are the "local attractors" where the optimization has locked onto a locally consistent but globally wrong match.
+Optionally (mode `"highresidual"`), within these bad regions only the voxels with the most significant residual reduction after iteration compared to the initial motion residual are selected — these are the "local attractors" where the optimization has locked onto a locally consistent but globally wrong match.
 
 **Build reference-domain trap mask**: The bad-region voxels are projected into reference space via the current mapping $\phi$, and a mask is grown around them (spatially and by intensity/gradient similarity) using `build_reference_trap_mask_from_bad_moving`. This mask is applied to the **reference** domain because that is where the false correspondence lives.
 
