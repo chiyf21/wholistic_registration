@@ -47,7 +47,6 @@ def correctMotionGrid(data_raw, coords_new):
 
     return data_corrected
 
-
 def getNeiDiff(phi_current, r):
     """
     Calculate the neighbor difference using a filter to enforce smoothness.
@@ -83,7 +82,6 @@ def getNeiDiff(phi_current, r):
 
     return neiDiff
 
-
 def calError(It, penaltyRaw, smoothPenaltySum):
     """
     Calculate the error and penalty terms for the given 3D data.
@@ -117,7 +115,6 @@ def calError(It, penaltyRaw, smoothPenaltySum):
         return diffError.get(), penaltyError.get()  # Convert GPU arrays to CPU
     else:
         return float(diffError), float(penaltyError)  # Already CPU arrays
-
 
 def getSpatialGradientInOrgGrid(data_raw, coords_new):
     """
@@ -192,7 +189,6 @@ def getSpatialGradientInOrgGrid(data_raw, coords_new):
     Iz = (data_incre - data_decre) / (2 * step)  # Shape: (H, W, D)
 
     return Ix, Iy, Iz
-
 
 def getFlow3_withPenalty6(
     Ixx, Ixy, Ixz, Iyy, Iyz, Izz, Ixt, Iyt, Izt, smoothPenaltySum, neiSum
@@ -285,9 +281,9 @@ def compute_new_grid(grid, r, motion_shape):
     # Stack the normalized coordinates
     return cp.stack([x_new, y_new, z_new], axis=0)  # Shape: (3, H, W, D)
 
-
 ## The same as before
 ####################################################################################################
+
 def _softmax_stable(x, axis=-1, eps=1e-8):
     """
     Numerically stable softmax.
@@ -295,7 +291,6 @@ def _softmax_stable(x, axis=-1, eps=1e-8):
     x_max = cp.max(x, axis=axis, keepdims=True)
     ex = cp.exp(x - x_max)
     return ex / (cp.sum(ex, axis=axis, keepdims=True) + eps)
-
 
 def _patch_grid_regularization(
     mu_patch,
@@ -344,7 +339,6 @@ def _patch_grid_regularization(
         z = (conf * mu_patch + lam * neighbor_sum) / (conf + 4.0 * lam + eps)
 
     return z
-
 
 def FindInitPhase_robust(
     data_mov,
@@ -711,7 +705,7 @@ def generate_continuous_H_gpu(stack, zRatio):
     def H(coords_phys):
         coords = cp.asarray(coords_phys)
         coords_idx = coords.copy()
-        coords_idx[..., 0] = coords[..., 0] / zRatio
+        coords_idx[..., 2] = coords[..., 2] / zRatio
         shape = coords_idx.shape
         coords_flat = coords_idx.reshape(-1, 3).T
         values = cupy_ndimage.map_coordinates(
@@ -720,7 +714,6 @@ def generate_continuous_H_gpu(stack, zRatio):
         return values.reshape(*shape[:-1])
 
     return H
-
 
 def apply_H_to_matrix_gpu(A, H):
     """
@@ -805,7 +798,6 @@ def get_local_error_on_control_points(It, xG_grid, yG_grid, zG_grid,
     err_cp = err_avg[xG_grid, yG_grid, zG_grid]
     return err_cp, err_dense
 
-
 def detect_significant_mad(values, threshold=3.0):
     """
     MAD-based outlier detection on a flattened array.
@@ -830,155 +822,9 @@ def detect_significant_mad(values, threshold=3.0):
 
     return idx.astype(cp.int64)
 
-# FIX: removed duplicate `import cupy as cp` — cp is already imported via `from . import cp`
-import cupyx.scipy.ndimage as ndi
-
-
 def _normalize_vec_field(vx, vy, vz, eps=1e-6):
     norm = cp.sqrt(vx**2 + vy**2 + vz**2) + eps
     return vx / norm, vy / norm, vz / norm
-
-
-def build_reference_trap_mask_from_bad_moving(
-    bad_mask,
-    phase_new,
-    data_ref_layer,
-    z_ratio_ref,
-    seed_quantile=0.0,
-    grow_radius_xy=7,
-    grow_radius_z=11,
-    sigma_intensity=0.15,
-    sigma_grad=1.5,
-    cos_thresh=0.5,
-):
-    """
-    Build a structure-aware trap mask in reference space from bad moving locations.
-
-    Parameters
-    ----------
-    bad_mask : cp.ndarray, bool, shape (x, y, z_mov)
-        Bad region on moving grid.
-    phase_new : cp.ndarray, shape (x, y, z_mov, 3)
-        Current mapping from moving grid to reference coordinates.
-    data_ref_layer : cp.ndarray, shape (x_ref, y_ref, z_ref)
-        Reference image on current pyramid layer.
-    z_ratio_ref : float
-        Physical z anisotropy of reference on this layer.
-    seed_quantile : float
-        Optional threshold for seed sparsification, 0 means keep all bad points.
-    grow_radius_xy : int
-        Local growth radius in x/y on reference grid.
-    grow_radius_z : int
-        Local growth radius in z on reference grid.
-    sigma_intensity : float
-        Intensity similarity tolerance.
-    sigma_grad : float
-        Gaussian smoothing sigma before computing gradients.
-    cos_thresh : float
-        Gradient-direction similarity threshold.
-    """
-    x_ref, y_ref, z_ref = data_ref_layer.shape
-    trap_mask_ref = cp.zeros((x_ref, y_ref, z_ref), dtype=cp.bool_)
-
-    if not cp.any(bad_mask):
-        return trap_mask_ref
-
-    # 1) reference gradients
-    ref_sm = ndi.gaussian_filter(data_ref_layer.astype(cp.float32), sigma=(sigma_grad, sigma_grad, sigma_grad))
-    gx = ndi.sobel(ref_sm, axis=0) / 8.0
-    gy = ndi.sobel(ref_sm, axis=1) / 8.0
-    gz = ndi.sobel(ref_sm, axis=2) / 8.0
-    gz = gz / max(z_ratio_ref, 1e-6)
-
-    gx, gy, gz = _normalize_vec_field(gx, gy, gz)
-
-    # 2) seeds from bad moving voxels -> reference coords
-    seed_coords = phase_new[bad_mask]   # (N, 3)
-    if seed_coords.shape[0] == 0:
-        return trap_mask_ref
-
-    seed_x = cp.rint(seed_coords[:, 0]).astype(cp.int32)
-    seed_y = cp.rint(seed_coords[:, 1]).astype(cp.int32)
-    seed_z = cp.rint(seed_coords[:, 2]).astype(cp.int32)
-
-    keep = (
-        (seed_x >= 0) & (seed_x < x_ref) &
-        (seed_y >= 0) & (seed_y < y_ref) &
-        (seed_z >= 0) & (seed_z < z_ref)
-    )
-    seed_x = seed_x[keep]
-    seed_y = seed_y[keep]
-    seed_z = seed_z[keep]
-
-    if seed_x.size == 0:
-        return trap_mask_ref
-
-    
-    seed_lin = seed_x * (y_ref * z_ref) + seed_y * z_ref + seed_z
-    seed_lin = cp.unique(seed_lin)
-    seed_x = seed_lin // (y_ref * z_ref)
-    rem = seed_lin % (y_ref * z_ref)
-    seed_y = rem // z_ref
-    seed_z = rem % z_ref
-
-    # 3) local structure-aware growth around each seed
-    for i in range(seed_x.size):
-        cx = int(seed_x[i])
-        cy = int(seed_y[i])
-        cz = int(seed_z[i])
-
-        x0 = max(0, cx - grow_radius_xy)
-        x1 = min(x_ref, cx + grow_radius_xy + 1)
-        y0 = max(0, cy - grow_radius_xy)
-        y1 = min(y_ref, cy + grow_radius_xy + 1)
-        z0 = max(0, cz - grow_radius_z)
-        z1 = min(z_ref, cz + grow_radius_z + 1)
-
-        patch = data_ref_layer[x0:x1, y0:y1, z0:z1]
-
-        # seed intensity
-        I0 = data_ref_layer[cx, cy, cz]
-
-        # seed gradient direction
-        g0x = gx[cx, cy, cz]
-        g0y = gy[cx, cy, cz]
-        g0z = gz[cx, cy, cz]
-
-        # local gradient directions
-        pgx = gx[x0:x1, y0:y1, z0:z1]
-        pgy = gy[x0:x1, y0:y1, z0:z1]
-        pgz = gz[x0:x1, y0:y1, z0:z1]
-
-        # intensity similarity
-        sim_I = cp.exp(-((patch - I0) ** 2) / (2 * sigma_intensity ** 2 + 1e-6))
-
-        # gradient direction similarity
-        cos_sim = cp.abs(pgx * g0x + pgy * g0y + pgz * g0z)
-
-        # physical anisotropic distance
-        XX, YY, ZZ = cp.meshgrid(
-            cp.arange(x0, x1),
-            cp.arange(y0, y1),
-            cp.arange(z0, z1),
-            indexing="ij"
-        )
-        d2 = (
-            (XX - cx) ** 2 +
-            (YY - cy) ** 2 +
-            ((ZZ - cz) / max(z_ratio_ref, 1e-6)) ** 2
-        )
-
-        # candidate region:
-        # 1) intensity close to seed
-        # 2) gradient direction reasonably aligned
-        # 3) distance not too large
-        local_mask = (sim_I > cp.exp(-0.5)) & (cos_sim > cos_thresh)
-
-        local_mask = local_mask & (d2 <= (grow_radius_xy ** 2))
-
-        trap_mask_ref[x0:x1, y0:y1, z0:z1] |= local_mask
-
-    return trap_mask_ref
 
 def get_wrong_regions_2d(err2d, r, xG, yG, x_threshold, y_threshold,
                          mad_threshold=3.0, min_component_size=2):
@@ -1080,6 +926,184 @@ def get_wrong_regions_2d(err2d, r, xG, yG, x_threshold, y_threshold,
 
     return region_coor, connected_components
 
+def _make_ball(radius_xy, z_ratio):
+    """
+    Small anisotropic 3D structuring element.
+    Distance:
+        d^2 = dx^2 + dy^2 + (dz / z_ratio)^2
+    """
+    radius_xy = int(max(1, radius_xy))
+    z_ratio = max(float(z_ratio), 1e-6)
+
+    radius_z = int(max(1, round(radius_xy * z_ratio)))
+
+    xs = cp.arange(-radius_xy, radius_xy + 1, dtype=cp.float32)
+    ys = cp.arange(-radius_xy, radius_xy + 1, dtype=cp.float32)
+    zs = cp.arange(-radius_z, radius_z + 1, dtype=cp.float32)
+
+    XX, YY, ZZ = cp.meshgrid(xs, ys, zs, indexing="ij")
+    dist2 = XX**2 + YY**2 + (ZZ / z_ratio)**2
+    return (dist2 <= radius_xy**2 + 1e-6).astype(cp.bool_)
+
+def _connected_grow(seed_mask, allowed_mask, structure, max_steps):
+    """
+    Grow from seed inside allowed_mask for at most max_steps iterations.
+    """
+    region = seed_mask.copy()
+    for _ in range(int(max_steps)):
+        grown = cupy_ndimage.binary_dilation(region, structure=structure)
+        grown = grown & allowed_mask
+        if bool(cp.all(grown == region).item()):
+            break
+        region = grown
+    return region
+
+def build_reference_trap_mask_from_bad_moving(
+    bad_mask,
+    phase_new,
+    data_ref_layer,
+    z_ratio_ref,
+    expand_radius_xy=2,
+    sigma_grad=1.0,
+    intensity_k=2.5,
+):
+    """
+    Minimal connected trap-mask construction.
+
+    Parameters
+    ----------
+    bad_mask : cp.ndarray, bool, shape (x, y, z_mov)
+        Bad region on moving grid.
+    phase_new : cp.ndarray, shape (x, y, z_mov, 3)
+        Current mapping from moving grid to reference coordinates.
+    data_ref_layer : cp.ndarray, shape (x_ref, y_ref, z_ref)
+        Reference image on current pyramid layer.
+    z_ratio_ref : float
+        Physical z anisotropy on this layer.
+    expand_radius_xy : int
+        Max growth distance from the initial mapped seed, measured in xy voxels.
+    sigma_grad : float
+        Mild Gaussian smoothing before intensity comparison.
+    intensity_k : float
+        Intensity tolerance multiplier. Larger -> easier to grow.
+    """
+    x_ref, y_ref, z_ref = data_ref_layer.shape
+    trap_mask_ref = cp.zeros((x_ref, y_ref, z_ref), dtype=cp.bool_)
+
+    if not cp.any(bad_mask):
+        return trap_mask_ref
+
+    # ------------------------------------------------------------
+    # 1) moving bad mask -> reference seed mask
+    # ------------------------------------------------------------
+    seed_coords = phase_new[bad_mask]
+    if seed_coords.shape[0] == 0:
+        return trap_mask_ref
+
+    seed_x = cp.rint(seed_coords[:, 0]).astype(cp.int32)
+    seed_y = cp.rint(seed_coords[:, 1]).astype(cp.int32)
+    seed_z = cp.rint(seed_coords[:, 2]).astype(cp.int32)
+
+    keep = (
+        (seed_x >= 0) & (seed_x < x_ref) &
+        (seed_y >= 0) & (seed_y < y_ref) &
+        (seed_z >= 0) & (seed_z < z_ref)
+    )
+    seed_x = seed_x[keep]
+    seed_y = seed_y[keep]
+    seed_z = seed_z[keep]
+
+    if seed_x.size == 0:
+        return trap_mask_ref
+
+    seed_mask_ref = cp.zeros((x_ref, y_ref, z_ref), dtype=cp.bool_)
+    seed_mask_ref[seed_x, seed_y, seed_z] = True
+
+    # very mild cleanup only
+    structure_small = _make_ball(1, z_ratio_ref)
+    seed_mask_ref = cupy_ndimage.binary_closing(seed_mask_ref, structure=structure_small)
+
+    if not cp.any(seed_mask_ref):
+        return trap_mask_ref
+
+    # ------------------------------------------------------------
+    # 2) local ROI around the seed
+    # ------------------------------------------------------------
+    seed_idx = cp.argwhere(seed_mask_ref)
+    xmin = int(seed_idx[:, 0].min().item())
+    xmax = int(seed_idx[:, 0].max().item())
+    ymin = int(seed_idx[:, 1].min().item())
+    ymax = int(seed_idx[:, 1].max().item())
+    zmin = int(seed_idx[:, 2].min().item())
+    zmax = int(seed_idx[:, 2].max().item())
+
+    margin_xy = int(max(1, expand_radius_xy + 2))
+    margin_z = int(max(1, round((expand_radius_xy + 2) * z_ratio_ref)))
+
+    x0 = max(0, xmin - margin_xy)
+    x1 = min(x_ref, xmax + margin_xy + 1)
+    y0 = max(0, ymin - margin_xy)
+    y1 = min(y_ref, ymax + margin_xy + 1)
+    z0 = max(0, zmin - margin_z)
+    z1 = min(z_ref, zmax + margin_z + 1)
+
+    ref_crop = data_ref_layer[x0:x1, y0:y1, z0:z1].astype(cp.float32)
+    seed_crop = seed_mask_ref[x0:x1, y0:y1, z0:z1]
+
+    if not cp.any(seed_crop):
+        return trap_mask_ref
+
+    # ------------------------------------------------------------
+    # 3) smooth reference a little
+    # ------------------------------------------------------------
+    ref_sm = cupy_ndimage.gaussian_filter(
+        ref_crop,
+        sigma=(sigma_grad, sigma_grad, sigma_grad)
+    )
+
+    # ------------------------------------------------------------
+    # 4) robust seed intensity statistics
+    # ------------------------------------------------------------
+    seed_vals = ref_sm[seed_crop]
+    I_med = float(cp.median(seed_vals).item())
+    I_mad = float(cp.median(cp.abs(seed_vals - I_med)).item())
+
+    # automatic intensity tolerance
+    tol = max(intensity_k * 1.4826 * I_mad, 1e-3)
+
+    # ------------------------------------------------------------
+    # 5) distance-to-seed constraint
+    # ------------------------------------------------------------
+    dist_to_seed = cupy_ndimage.distance_transform_edt(
+        ~seed_crop,
+        sampling=(1.0, 1.0, 1.0 / max(z_ratio_ref, 1e-6))
+    ).astype(cp.float32)
+
+    # only allow nearby voxels
+    near_mask = dist_to_seed <= float(expand_radius_xy)
+
+    # only allow intensities similar to the seed region
+    intensity_mask = cp.abs(ref_sm - I_med) <= tol
+
+    # allowed region for growth
+    allowed_mask = (near_mask & intensity_mask) | seed_crop
+
+    # ------------------------------------------------------------
+    # 6) connected growth from seed
+    # ------------------------------------------------------------
+    grow_structure = _make_ball(1, z_ratio_ref)
+    region = _connected_grow(
+        seed_mask=seed_crop,
+        allowed_mask=allowed_mask,
+        structure=grow_structure,
+        max_steps=expand_radius_xy
+    )
+
+    # keep the seed for sure
+    region = region | seed_crop
+
+    trap_mask_ref[x0:x1, y0:y1, z0:z1] = region
+    return trap_mask_ref
 
 def build_bad_region_mask_from_cp_error(err_cp, r, xG, yG, x_size, y_size,
                                         mad_threshold=3.0, min_component_size=2):
@@ -1134,10 +1158,7 @@ def get_quantile_threshold(arr, q=0.95):
     return part[k]
 
 
-# =========================================================
 # 2. Cross-resolution registration helpers
-# =========================================================
-
 def compose_phase_from_motion(phase_current, motion_current, zRatio, zRatio_hr):
     """
     Compose phase_current and motion_current into the final mapping phase_new.
@@ -1145,7 +1166,7 @@ def compose_phase_from_motion(phase_current, motion_current, zRatio, zRatio_hr):
     phase_new is defined in reference-grid coordinates.
     """
     phase_update = motion_current.copy()
-    phase_update[..., 2] = phase_update[..., 2] * (zRatio_hr / zRatio)
+    phase_update[..., 2] = phase_update[..., 2] / zRatio_hr 
     phase_new = phase_current + phase_update
     return phase_new
 
@@ -1173,7 +1194,7 @@ def resample_exclude_mask(mask, output_shape, threshold=0.5):
     mask_rs = imresize(cp.asarray(mask, dtype=cp.float32), output_shape=output_shape)
     return mask_rs > threshold
 
-def initialize_motion_for_layer(option, layer, layer_num, SZ, x, y, z, prev_motion=None):
+def initialize_motion_for_layer(option, layer, layer_num, SZ, x, y, z, pyramid = "anisotropic",prev_motion=None):
     """
     Initialize motion field for current layer.
     """
@@ -1195,8 +1216,7 @@ def initialize_motion_for_layer(option, layer, layer_num, SZ, x, y, z, prev_moti
 
     return motion_current
 
-
-def initialize_phase_for_layer(option, SZ, x, y, z, zRatio, zRatio_hr):
+def initialize_phase_for_layer(option, SZ,layer, x, y, z, zRatio, zRatio_hr):
     """
     Initialize phase field for current layer.
     """
@@ -1248,10 +1268,7 @@ def compute_valid_mask_on_moving_grid(phase_new, H_mask_ref_layer, mask_mov_laye
     return valid_mask
 
 
-# =========================================================
 # 3. Core optimizer for one layer
-# =========================================================
-
 def optimize_layer_cross_resolution(
     data_mov_layer,
     data_ref_layer,
@@ -1480,6 +1497,11 @@ def correct_wrong_regions_one_layer(
     bad_region_exclude_mode="direct",
     verbose=False,
     layer=None,
+    #Params for constructing trap mask in reference space
+    expand_radius_xy=2.0,
+    sigma_grad=1.0,
+    intensity_k=2.0,
+    quantile_threshold_q=0.8,
 ):
     """
     Run normal optimization, detect bad regions, mask them out, rerun, and accept
@@ -1516,7 +1538,6 @@ def correct_wrong_regions_one_layer(
     motion0 = res0["motion"]
     current_error0 = res0["current_error"]
     residual0 = res0["residual"]
-    error_last0 = res0["error_last"]
     valid_mask0 = res0["valid_mask"]
 
     # -----------------------------------------------------
@@ -1544,27 +1565,35 @@ def correct_wrong_regions_one_layer(
 
     # Optionally refine bad-mask with dense residual threshold inside detected regions
     if bad_region_exclude_mode == "highresidual":
-        dense_err = error_last0.copy()
+        error_init0 = res0["error_init"]
+        error_last0 = res0["error_last"]
+        # visualization.visualize_2d_image(error_init0.get(),autocontrast=True,title=f"[layer={layer}] dense error before thresholding")
+        # visualization.visualize_2d_image(error_last0.get(),autocontrast=True,title=f"[layer={layer}] dense error before thresholding")
+
+        dense_err = error_init0 - error_last0
+        dense_err = calculate.imfilter(
+            dense_err, cp.ones((3, 3, 1), dtype=cp.float32) / 9,
+            "replicate", "same", "corr"
+        )
         dense_err[~bad_mask] = 0
-        th = get_quantile_threshold(dense_err[bad_mask], q=0.7) if cp.any(bad_mask) else 0
+        # visualization.visualize_2d_image(dense_err.get(),autocontrast=True,title=f"[layer={layer}] dense error before thresholding")
+        th = get_quantile_threshold(dense_err[bad_mask], q=quantile_threshold_q) if cp.any(bad_mask) else 0
         bad_mask = bad_mask & (dense_err >= th)
         
     # visualization.visualize_2d_image(bad_mask.get(),autocontrast=False)
     # Only exclude regions that were originally valid in moving mask
     bad_mask = bad_mask & valid_mask0
-
+    # visualization.visualize_2d_image(bad_mask.get(),autocontrast=False,title=f"[layer={layer}] bad region mask on moving grid")
     trap_mask_ref = build_reference_trap_mask_from_bad_moving(
-        bad_mask=bad_mask,
-        phase_new=res0["phase_new"],
-        data_ref_layer=data_ref_layer,
-        z_ratio_ref=zRatio_hr,
-        grow_radius_xy=7,
-        grow_radius_z=11,
-        sigma_intensity=0.15,
-        sigma_grad=1.5,
-        cos_thresh=0.5,
+            bad_mask=bad_mask,
+            phase_new=res0["phase_new"],
+            data_ref_layer=data_ref_layer,
+            z_ratio_ref=zRatio_hr,
+            expand_radius_xy=expand_radius_xy/(2.0**layer),
+            sigma_grad=sigma_grad,
+            intensity_k=intensity_k,
     )
-
+    # visualization.visualize_3d_image(trap_mask_ref.get(),title=f"[layer={layer}] trap mask in reference space")
     corrected_mask_ref = mask_ref_layer | trap_mask_ref
 
     H_mask_ref_layer_corrected = generate_continuous_H_gpu(
@@ -1711,7 +1740,11 @@ def getMotion_v2(data_mov, data_ref, option, verbose=False):
     wrong_region_mad_threshold = float(option.get("wrong_region_mad_threshold", 3.0))
     wrong_region_min_component_size = int(option.get("wrong_region_min_component_size", 2))
     wrong_region_exclude_mode = option.get("wrong_region_exclude_mode", "direct")
-
+    expand_radius_xy = float(option.get("expand_radius_xy", 2.0))
+    sigma_grad = float(option.get("sigma_grad", 1.0))
+    intensity_k = float(option.get("intensity_k", 2.0))
+    quantile_threshold_q = float(option.get("quantile_threshold_q", 0.8))
+    
     data_mov = cp.asarray(data_mov, dtype=cp.float32)
     data_ref = cp.asarray(data_ref, dtype=cp.float32)
 
@@ -1728,8 +1761,6 @@ def getMotion_v2(data_mov, data_ref, option, verbose=False):
     for layer in range(layer_num, -1, -1):
         if verbose:
             print(f"\n========== start layer {layer}/{layer_num} ==========")
-
-        # moving resolution
         x = int(SZ[0] / (2 ** layer))
         y = int(SZ[1] / (2 ** layer))
         z = SZ[2]
@@ -1747,7 +1778,6 @@ def getMotion_v2(data_mov, data_ref, option, verbose=False):
 
         zRatio = zRatio_raw / (2 ** layer)
         zRatio_hr = zRatio_HR / (2 ** layer)
-
         H_ref_layer = generate_continuous_H_gpu(data_ref_layer, zRatio=1)
         H_mask_ref_layer = generate_continuous_H_gpu(mask_ref_layer.astype(cp.float32), zRatio=1)
 
@@ -1763,6 +1793,7 @@ def getMotion_v2(data_mov, data_ref, option, verbose=False):
         phase_current = initialize_phase_for_layer(
             option=option,
             SZ=SZ,
+            layer=layer,
             x=x, y=y, z=z,
             zRatio=zRatio,
             zRatio_hr=zRatio_hr
@@ -1804,6 +1835,10 @@ def getMotion_v2(data_mov, data_ref, option, verbose=False):
                 bad_region_exclude_mode=wrong_region_exclude_mode,
                 verbose=verbose,
                 layer=layer,
+                expand_radius_xy=expand_radius_xy,
+                sigma_grad=sigma_grad,
+                intensity_k=intensity_k,
+                quantile_threshold_q=quantile_threshold_q
             )
         else:
             result = optimize_layer_cross_resolution(

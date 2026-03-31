@@ -875,8 +875,6 @@ def readTiff(tiff_path):
             desc = desc.value
     return images, desc
 
-
-
 def write_volume_as_ome_tiff(volume, out_dir, ch_idx, frame_idx, configPath,
                              spacing_x=1.0, spacing_y=1.0):
     """
@@ -933,6 +931,7 @@ def write_volume_as_ome_tiff(volume, out_dir, ch_idx, frame_idx, configPath,
                     metadata=metadata, verbose=False)
 
     return fname
+
 def write_multichannel_volume_as_ome_tiff(volume, out_dir, frame_idx, configPath=None,label=None,
                                           spacing_x=1.0, spacing_y=1.0):
     """

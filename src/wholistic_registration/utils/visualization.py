@@ -75,7 +75,7 @@ def visualize_2d_image(image, cmap='gray', title='2D Image',threshold=None,autoc
 
 
 
-def visualize_3d_image(image, slice_axis=2, cmap='gray', title='3D Image Slice'):
+def visualize_3d_image(image, slice_axis=2, cmap='gray', title='3D Image Slice',autocontrast = False):
     """
     Interactive viewer for a 3D image stack using ipywidgets.
 
@@ -103,7 +103,10 @@ def visualize_3d_image(image, slice_axis=2, cmap='gray', title='3D Image Slice')
             image_slice = image[:, :, slice_index]
 
         plt.figure(figsize=(6, 6))
-        plt.imshow(image_slice, cmap=cmap)
+        if autocontrast:
+            plt.imshow(auto_contrast(image_slice), cmap=cmap)
+        else:
+            plt.imshow(image_slice, cmap=cmap)
         plt.title(f"{title} (axis={slice_axis}, slice={slice_index})")
         plt.axis("off")
         plt.colorbar()

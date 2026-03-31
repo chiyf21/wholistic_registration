@@ -128,7 +128,7 @@ In slice-to-volume registration, we first need to find where each 2D moving slic
 
 For each patch, rather than just picking the single best-matching $z$-slice, we use the full similarity curve across all candidate $z$-positions as a soft probability distribution.
 
-![result](images/Different_map_in_one_image.png)
+<img src="images/Different_map_in_one_image.png" alt="result" width="320" height="543">
 
 ### Weighted ZNCC
 
@@ -220,6 +220,41 @@ $$
 The first term keeps high-confidence patches close to their own estimates; the second encourages neighboring patches to agree. This allows unreliable patches to be guided by more reliable neighbors, producing a globally consistent depth map.
 
 Overall, this framework replaces a brittle "winner-takes-all" strategy with a probabilistic and context-aware approach, making it significantly more robust to noise, ambiguous matches, and biological variability in the data.
+### Parameter Explanation 
+
+#### `overlap` (default = `0.5`)
+This controls how much neighboring patches overlap with each other when the image is divided into small local regions. If `overlap` is larger, adjacent patches share more area, so the final depth estimation is usually smoother and more stable, because each pixel is influenced by more local measurements. If `overlap` is smaller, the computation is faster, but the patch grid becomes sparser and the result may look more blocky or less robust in difficult regions. Intuitively, this parameter controls how densely we sample the image with local patches.
+
+#### `smooth_sigma` (default = `20.0`)
+This is the Gaussian smoothing strength applied to the final dense z-map in the XY plane. A larger value means stronger spatial smoothing, so the final initialization becomes more spatially coherent and less noisy, but very large values may oversmooth real local structure. A smaller value keeps more local detail, but may also preserve noise or patch inconsistency. Intuitively, this parameter controls how smooth the final depth surface looks across the image.
+
+#### `weight_eps` (default = `1e-6`)
+This is a very small positive number added in divisions and normalizations to avoid numerical instability, especially division by zero. It does not change the method conceptually, but it makes the computation safe when local variance or weight sums are extremely small. Intuitively, this is just a numerical safeguard.
+
+#### `z_curve_sigma` (default = `1.0`)
+This controls how strongly the matching score curve along the z direction is smoothed before building the posterior. Each patch has a score curve across all candidate z slices, and this parameter reduces small jagged fluctuations in that curve. A larger value gives a smoother curve and suppresses noisy local spikes, but if it is too large it may blur away meaningful peaks. A smaller value keeps the original curve shape more faithfully, but may leave too much noise. Intuitively, this parameter controls how much we trust the overall trend of the z-score curve rather than tiny local fluctuations.
+
+#### `posterior_beta` (default = `12.0`)
+This is the inverse temperature used when converting the smoothed z-score curve into a posterior distribution over z. If `posterior_beta` is larger, the posterior becomes sharper and concentrates more strongly around the best-scoring z positions. If it is smaller, the posterior becomes flatter and spreads probability over a wider range of z. Intuitively, this parameter controls how “decisive” the algorithm is when turning matching scores into a soft depth estimate: large values behave more like a hard choice, while small values behave more cautiously.
+
+#### `local_radius` (default = `3`)
+This defines the radius around the dominant peak when measuring how much posterior mass is concentrated near the main mode. It is used to judge whether the z-curve has one main plausible region or whether the probability is spread across multiple separated depths. A larger radius is more tolerant and counts a broader neighborhood as belonging to the main peak. A smaller radius is stricter and only rewards very concentrated peaks. Intuitively, this parameter controls how locally we define “most of the probability is around one main depth”.
+
+#### `smoothness_alpha` (default = `6.0`)
+This controls how strongly rough or jagged z-score curves are penalized when computing confidence. If this value is larger, curves with strong second-order oscillation will lose confidence more aggressively. If it is smaller, even somewhat irregular curves will still retain confidence. Intuitively, this parameter controls how much the algorithm dislikes noisy, unstable z-curves.
+
+#### `regularization_lambda` (default = `1.0`)
+This is the strength of spatial regularization on the patch grid. After each patch gets its own soft depth estimate, neighboring patches are encouraged to agree with each other, especially when some patches are unreliable. A larger value means stronger spatial coupling, so low-confidence patches will follow neighboring reliable patches more strongly. A smaller value means each patch keeps its own estimate more independently. Intuitively, this parameter controls how much neighboring patches are encouraged to be consistent.
+
+#### `regularization_iters` (default = `40`)
+This is the number of iterations used in the patch-grid regularization step. More iterations allow the spatial regularization effect to propagate further across the patch grid, leading to a more stabilized patch-wise depth field. Fewer iterations make the process weaker and more local. Intuitively, this parameter controls how fully the neighboring patches are allowed to “communicate” and smooth each other.
+
+#### `min_confidence` (default = `1e-3`)
+This is the lower bound on patch confidence. Even if a patch looks very unreliable, its confidence will not drop below this value. This prevents completely zeroing out a patch and avoids numerical problems or overly extreme behavior during fusion and regularization. Intuitively, this parameter ensures that every patch still contributes at least a tiny amount, even when the algorithm is not confident about it.
+
+#### Overall intuition
+
+These parameters mainly affect three stages of the method. First, `overlap` and `smooth_sigma` control how the final dense z initialization is spatially sampled and smoothed. Second, `z_curve_sigma`, `posterior_beta`, `local_radius`, and `smoothness_alpha` control how the algorithm interprets the z-score curve for each patch, including how much it smooths the curve, how sharply it forms a posterior, and how it evaluates whether the curve is reliable. Third, `regularization_lambda`, `regularization_iters`, and `min_confidence` control how patch-wise depth estimates are regularized and fused together, especially in uncertain regions. In a very intuitive sense, these parameters together determine how much the algorithm trusts local evidence, how sharply it chooses depth, and how strongly it asks neighboring patches to agree.
 
 ## 2. How to escape from local optima
 
@@ -250,7 +285,35 @@ Optionally (mode `"highresidual"`), within these bad regions only the voxels wit
 - **Code**: `correct_wrong_regions_one_layer` in `calFlowCrossResolution.py` (line ~1456)
 - **Called by**: `getMotion_v2` (line ~1779), which loops over pyramid layers coarse-to-fine
 - **Integration**: `getMotion_v2` is currently used in `test_HR.ipynb`. The main production pipeline (`main_function.py` → `registration.py`) still calls the v1 `calFlow3d_Wei_v1.getMotion`, which does **not** include wrong-region correction.
+### Parameter Explanation 
 
+#### `error_metric` (`"mse"` or `"mae"`)
+This specifies which error metric is used when computing the local residual/error on control points. The default value `"mse"` means mean squared error, which gives larger penalties to larger mismatches. 
+
+#### `mad_threshold` (default = `3.0`)
+This controls the threshold for detecting bad regions from the control-point error map using a robust MAD-based criterion. A larger value means the algorithm is more conservative and only marks very abnormal regions as bad. A smaller value means it is more aggressive and will flag more regions as suspicious. Intuitively, this parameter controls how “strict” the algorithm is when deciding that a region is problematic.
+
+#### `min_component_size` (default = `2`)
+After bad regions are detected, very small connected components can be removed as likely noise. This parameter sets the minimum size of a connected bad region that is allowed to remain. A larger value removes more tiny isolated detections, while a smaller value keeps even very small suspicious regions. Intuitively, this parameter controls whether the algorithm ignores tiny scattered artifacts or keeps them as possible wrong regions.
+
+#### `bad_region_exclude_mode` (default = `"direct"`)
+This determines how the detected bad regions are excluded before rerunning the optimization. In `"direct"` mode, all detected bad regions are excluded directly. In `"highresidual"` mode, the algorithm is more selective: it first detects bad regions, and then only keeps the highest-residual part inside those regions. Intuitively, this parameter controls whether the correction step is broad and simple, or more focused on the worst part of each problematic region.
+
+#### `expand_radius_xy` (default = `2.0`)
+This controls how much the detected problematic region is spatially expanded in the XY plane when constructing the trap mask in reference space. A larger value means the masked region becomes broader, so the algorithm blocks out a wider neighborhood around suspicious matches. A smaller value keeps the mask tighter and more localized. Intuitively, this parameter controls how much surrounding context is also treated as potentially unreliable once a bad region is found.
+
+#### `sigma_grad` (default = `1.0`)
+This controls the smoothing scale used when computing or using gradient-related information during trap-mask construction in reference space. A larger value makes the gradient information smoother and less sensitive to small local fluctuations, while a smaller value makes it more sensitive to local detail. Intuitively, this parameter controls how locally or globally the image structure is interpreted when deciding which reference regions should be masked out.
+
+#### `intensity_k` (default = `2.0`)
+This controls the strength of the intensity-based criterion when constructing the trap mask in reference space. A larger value generally means the intensity condition is stricter or more strongly emphasized, while a smaller value makes the intensity effect weaker. Intuitively, this parameter controls how strongly image intensity characteristics contribute to deciding whether a reference region looks like a potential trapping region.
+
+#### `quantile_threshold_q` (default = `0.8`)
+This parameter is used in the `"highresidual"` mode to keep only the highest-residual portion inside already detected bad regions. The default value `0.8` means the threshold is set at the 80th percentile, so only the most severe part of the residual values is retained. A larger value makes the selection more focused on only the worst points, while a smaller value includes a broader portion of the suspicious region. Intuitively, this parameter controls how concentrated the correction mask is inside each bad region.
+
+#### Overall intuition
+These parameters mainly control how the algorithm identifies suspicious regions, how aggressively it filters or refines them, and how it expands them into a trap mask in reference space. The first group, such as `error_metric`, `mad_threshold`, `min_component_size`, and `bad_region_exclude_mode`, determines how wrong regions are detected and refined. The second group, including `expand_radius_xy`, `sigma_grad`, `intensity_k`, and `quantile_threshold_q`, determines how those detected regions are turned into a mask in reference space that prevents the optimization from repeatedly falling into the same local trap.
+ 
 # Remaining Questions
 
 ## 1. What is the true zRatio of the image?

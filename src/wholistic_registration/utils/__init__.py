@@ -67,5 +67,9 @@ option={
     'thresFactor':5,
     'mask_size_range':[5,500],
     'smoothPenalty_raw':0.05,
-    'tol':1e-4
+    'tol':1e-4,
+    'expand_radius_xy':2.0,
+    'sigma_grad':1.0,
+    'intensity_k':2.0,
+    'quantile_threshold_q':0.8
 }
