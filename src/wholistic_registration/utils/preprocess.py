@@ -100,6 +100,100 @@ def normalize_to_255(img,lower_percentile=3,upper_percentile=99):
     norm_img = (clipped - lower) / (upper - lower + 1e-8) * 255
     return norm_img.astype(np.float64)
 
+def learn_quantile_mapping(
+    source,
+    target,
+    percentiles=None,
+    max_samples=5_000_000,
+    seed=0,
+):
+    """
+    Learn a monotonic intensity mapping from source distribution to target distribution.
+
+    source: ref crop, e.g. (20, 1500, 630)
+    target: mov crop, e.g. (20, 1500, 630)
+
+    Returns:
+        src_q: source quantile anchors
+        tgt_q: target quantile anchors
+    """
+    if percentiles is None:
+        percentiles = [
+            0.1, 0.5, 1, 2, 5,
+            10, 25, 50, 75, 90,
+            95, 99, 99.5, 99.8
+        ]
+
+    source = np.asarray(source)
+    target = np.asarray(target)
+
+    src_vals = source.reshape(-1).astype(np.float32)
+    tgt_vals = target.reshape(-1).astype(np.float32)
+
+    src_vals = src_vals[np.isfinite(src_vals)]
+    tgt_vals = tgt_vals[np.isfinite(tgt_vals)]
+
+    rng = np.random.default_rng(seed)
+
+    if src_vals.size > max_samples:
+        src_vals = rng.choice(src_vals, size=max_samples, replace=False)
+
+    if tgt_vals.size > max_samples:
+        tgt_vals = rng.choice(tgt_vals, size=max_samples, replace=False)
+
+    src_q = np.percentile(src_vals, percentiles).astype(np.float32)
+    tgt_q = np.percentile(tgt_vals, percentiles).astype(np.float32)
+
+    # np.interp 要求 x 坐标单调递增且最好没有重复
+    src_q_unique, unique_idx = np.unique(src_q, return_index=True)
+    tgt_q_unique = tgt_q[unique_idx]
+
+    return src_q_unique, tgt_q_unique, np.asarray(percentiles)[unique_idx]
+
+def apply_quantile_mapping(
+    source,
+    src_q,
+    tgt_q,
+    out_dtype=np.float32,
+    chunk_size=8,
+):
+    """
+    Apply learned source -> target intensity mapping.
+
+    source:
+        full ref image, shape can be (Z,Y,X) or any array whose first axis is chunked.
+
+    output:
+        mapped source, same shape, dtype=out_dtype
+    """
+    source = np.asarray(source)
+
+    out = np.empty(source.shape, dtype=out_dtype)
+
+    n = source.shape[0]
+
+    for i0 in range(0, n, chunk_size):
+        i1 = min(i0 + chunk_size, n)
+
+        block = source[i0:i1].astype(np.float32, copy=False)
+
+        mapped = np.interp(
+            block.reshape(-1),
+            src_q,
+            tgt_q,
+            left=tgt_q[0],
+            right=tgt_q[-1],
+        ).reshape(block.shape)
+
+        if np.issubdtype(np.dtype(out_dtype), np.integer):
+            info = np.iinfo(out_dtype)
+            mapped = np.clip(mapped, info.min, info.max)
+            mapped = np.rint(mapped)
+
+        out[i0:i1] = mapped.astype(out_dtype)
+
+    return out
+
 def generate_artificial_motion(image, art_R, Amp_art, zRatio, noise_level):
     """
     Generates artificial motion in a 3D image and applies Gaussian noise, returning both the moved and reference images along with the true motion field.

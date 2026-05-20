@@ -122,139 +122,214 @@ We did 10 repeats with various motion smoothness scale, deformation amplitude, a
 
 # Pre-process and post-process
 
-## 1. How to get the initial mapping
+## 1. How to get the initial mapping: Learning-based Coarse Registration(still training, haven't been used for the data) (NEW)
 
 In slice-to-volume registration, we first need to find where each 2D moving slice sits along the $z$-axis of the 3D reference volume. A naive approach would pick the $z$-slice with the highest correlation globally — but this fails when the field of view contains multiple disconnected structures, each needing its own $z$-match. So instead, we estimate the initial $z$-position **per patch**.
 
-For each patch, rather than just picking the single best-matching $z$-slice, we use the full similarity curve across all candidate $z$-positions as a soft probability distribution.
 
 <img src="images/Different_map_in_one_image.png" alt="result" width="320" height="543">
 
-### Weighted ZNCC
 
-For each patch $i$ (of size $P \times P$), we compute its similarity to every $z$-slice in the reference volume using **weighted zero-normalized cross-correlation (ZNCC)**.
+Before the iterative optimization stage, we first estimate a coarse correspondence between the sparse moving stack and the dense reference volume. The updated preprocessing stage consists of two steps. First, we estimate the initial axial locations of the moving slices using a global fixed-spacing ZNCC search. Second, we use a learning-based coarse matching model to predict a sparse 3D coordinate field on the moving control grid. The predicted coarse mapping is then used as the initialization for the subsequent iterative registration.
 
-Let $M(x,y)$ be the moving patch and $R(x,y,z)$ be the reference patch at candidate depth $z$. A Hann window $w(x,y)$ down-weights patch edges. Define the weighted means:
-
-$$
-\bar{M} = \frac{\sum_{x,y} w(x,y)\, M(x,y)}{\sum_{x,y} w(x,y)}, \qquad \bar{R}(z) = \frac{\sum_{x,y} w(x,y)\, R(x,y,z)}{\sum_{x,y} w(x,y)}
-$$
-
-and the centered versions $\tilde{M} = M - \bar{M}$, $\tilde{R}(z) = R(z) - \bar{R}(z)$. The ZNCC score at depth $z$ is:
+The overall coarse registration process is
 
 $$
-s(z) = \frac{\sum_{x,y} w\, \tilde{M}\, \tilde{R}(z)}{\sqrt{\sum_{x,y} w\, \tilde{M}^2} \;\sqrt{\sum_{x,y} w\, \tilde{R}(z)^2} + \epsilon}
+I^{mov}, I^{ref}
+\rightarrow
+\mathbf{z}^{init}
+\rightarrow
+\phi^{coarse},
 $$
 
-This gives $s(z) \in [-1, 1]$ for each candidate $z$, producing a similarity curve per patch. The score is optionally smoothed along $z$ with a 1D Gaussian ($\sigma_z$) to suppress jagged noise.
+where $$I^{mov}$$ is the moving sparse stack, $$I^{ref}$$ is the reference volume, $$\mathbf{z}^{init}$$ denotes the initial reference z-indices of the moving slices, and $$\phi^{coarse}$$ is the coarse 3D coordinate field predicted by the model.
 
-### Softmax posterior and depth estimate
+---
 
-Rather than picking the $z$ with the highest score (hard argmax), we convert the curve into a soft probability distribution (softmax):
+### Global Fixed-spacing Z Initialization
 
-$$
-p(z) = \frac{\exp\bigl(\beta \cdot s(z)\bigr)}{\sum_{z'} \exp\bigl(\beta \cdot s(z')\bigr)}
-$$
-
-where $\beta$ (inverse temperature) controls sharpness: large $\beta$ concentrates mass on the peak (approaching argmax), small $\beta$ spreads it out. The patch's estimated depth is the **posterior mean**:
+The moving image is a sparse stack with $$K$$ slices, while the reference image is a dense 3D volume with $$Z$$ slices. Since the moving slices are acquired with approximately fixed axial spacing, their corresponding reference z-locations can be represented as
 
 $$
-\mu = \sum_z z \cdot p(z)
+z_k = z_0 + k \Delta z_{ref} d,
 $$
 
-This is a **soft argmax** — it returns a continuous $z$-estimate that naturally handles broad or multi-modal peaks without unstable jumps.
+where $$z_0$$ is the unknown starting reference slice, $$\Delta z_{ref}$$ is the fixed spacing in the reference z-index system, and $$d$$ is the z-direction.
 
-### Confidence
+To estimate $$z_0$$, we compute a global ZNCC score between each moving slice and each reference slice. By default, the ZNCC is computed on the 2D gradient magnitude images rather than raw intensities, making the initialization more sensitive to structural similarity and less sensitive to absolute intensity changes. A Hann window is used as a spatial weight to reduce the influence of boundary artifacts.
 
-In addition to depth, we define a per-patch confidence $C$ that captures how reliable the matching information is. It has two components.
-
-<!-- FIX: all equations below were originally plain text mixed with partial LaTeX; rewritten as proper LaTeX -->
-**Evidence strength** — how much the best match stands out above the baseline:
+Let $$S(k,z)$$ be the weighted ZNCC score between the $$k$$-th moving slice and the $$z$$-th reference slice. We enumerate all valid starting positions $$z_0$$ and maximize the total fixed-spacing alignment score:
 
 $$
-C_{\text{evidence}} = \frac{\max_z s(z) - \text{median}_z\, s(z)}{1 - \text{median}_z\, s(z) + \varepsilon}
+z_0^*
+=
+\arg\max_{z_0}
+\sum_{k=0}^{K-1}
+S
+\left(
+k,
+\operatorname{round}
+\left(
+z_0 + k \Delta z_{ref} d
+\right)
+\right).
 $$
 
-**Shape quality** — composed of two factors:
-
-1. *Local posterior mass* around the dominant peak $z_{\text{peak}}$:
+The resulting initial z positions are
 
 $$
-C_{\text{local}} = \sum_{|z - z_{\text{peak}}| \le r} p(z)
+z_k^{init}
+=
+z_0^* + k \Delta z_{ref} d.
 $$
 
-This is high when the distribution is concentrated in a contiguous region (sharp or broad peak), and low when it is split across distant peaks.
+This step produces a globally consistent axial initialization for the entire sparse stack, instead of matching each moving slice independently.
 
-2. *Smoothness quality*, penalizing high-frequency fluctuations measured by second-order differences $R$:
+---
 
-$$
-C_{\text{smooth}} = \exp(-\alpha \cdot R)
-$$
+### Learning-based Coarse Matching Model
 
-These combine as:
+After obtaining $$\mathbf{z}^{init}$$, we use a learning-based coarse matching model to estimate the 3D reference coordinate of each moving control point. The model takes three inputs:
 
 $$
-C_{\text{shape}} = 0.5 \cdot C_{\text{local}} + 0.5 \cdot C_{\text{smooth}}
+I^{mov}, \quad I^{ref}, \quad \mathbf{z}^{init},
 $$
 
+and outputs a coarse coordinate field
+
 $$
-C = \text{clip}\bigl(C_{\text{evidence}} \cdot C_{\text{shape}},\; 0,\; 1\bigr)
-$$
-
-This ensures a patch is considered reliable only if it has both strong evidence and a well-structured curve:
-
-- Sharp, high peak → high confidence
-- Smooth, broad peak → still high confidence
-- Multiple competing peaks or noisy fluctuations → lower confidence
-- Uniformly low scores → very low confidence
-
-### Spatial regularization
-
-After obtaining a depth estimate $\mu$ and confidence $C$ for each patch, we enforce spatial consistency by solving a regularized optimization problem:
-
-<!-- FIX: original had plain text "min_{z_ij} sum_{i,j} C_ij * (z_ij - μ_ij)^2 + ..." instead of LaTeX -->
-$$
-\min_{z_{ij}} \sum_{i,j} C_{ij} \bigl(z_{ij} - \mu_{ij}\bigr)^2 + \lambda \sum_{(i,j) \sim (k,l)} \bigl(z_{ij} - z_{kl}\bigr)^2
+\phi^{coarse}(k,i,j)
+=
+\left(
+z^{ref}_{kij},
+y^{ref}_{kij},
+x^{ref}_{kij}
+\right),
 $$
 
-The first term keeps high-confidence patches close to their own estimates; the second encourages neighboring patches to agree. This allows unreliable patches to be guided by more reliable neighbors, producing a globally consistent depth map.
+where $$k$$ indexes the moving slice and $$(i,j)$$ indexes the spatial control grid on that slice.
 
-Overall, this framework replaces a brittle "winner-takes-all" strategy with a probabilistic and context-aware approach, making it significantly more robust to noise, ambiguous matches, and biological variability in the data.
-### Parameter Explanation 
+The model does not perform dense full-volume matching. Instead, it uses the initial z positions and the moving control-grid coordinates to define an initial reference coordinate for each query:
 
-#### `overlap` (default = `0.5`)
-This controls how much neighboring patches overlap with each other when the image is divided into small local regions. If `overlap` is larger, adjacent patches share more area, so the final depth estimation is usually smoother and more stable, because each pixel is influenced by more local measurements. If `overlap` is smaller, the computation is faster, but the patch grid becomes sparser and the result may look more blocky or less robust in difficult regions. Intuitively, this parameter controls how densely we sample the image with local patches.
+$$
+\mathbf{c}_0(k,i,j)
+=
+\left(
+z_k^{init},
+y_{ij},
+x_{ij}
+\right).
+$$
 
-#### `smooth_sigma` (default = `20.0`)
-This is the Gaussian smoothing strength applied to the final dense z-map in the XY plane. A larger value means stronger spatial smoothing, so the final initialization becomes more spatially coherent and less noisy, but very large values may oversmooth real local structure. A smaller value keeps more local detail, but may also preserve noise or patch inconsistency. Intuitively, this parameter controls how smooth the final depth surface looks across the image.
+For each query, the model searches only within a local 3D reference window centered at $$\mathbf{c}_0$$ or at the coordinate predicted by the previous refinement iteration. This design avoids the prohibitive memory cost of full global matching over the entire reference volume.
 
-#### `weight_eps` (default = `1e-6`)
-This is a very small positive number added in divisions and normalizations to avoid numerical instability, especially division by zero. It does not change the method conceptually, but it makes the computation safe when local variance or weight sums are extremely small. Intuitively, this is just a numerical safeguard.
+---
 
-#### `z_curve_sigma` (default = `1.0`)
-This controls how strongly the matching score curve along the z direction is smoothed before building the posterior. Each patch has a score curve across all candidate z slices, and this parameter reduces small jagged fluctuations in that curve. A larger value gives a smoother curve and suppresses noisy local spikes, but if it is too large it may blur away meaningful peaks. A smaller value keeps the original curve shape more faithfully, but may leave too much noise. Intuitively, this parameter controls how much we trust the overall trend of the z-score curve rather than tiny local fluctuations.
+## Model Architecture
 
-#### `posterior_beta` (default = `12.0`)
-This is the inverse temperature used when converting the smoothed z-score curve into a posterior distribution over z. If `posterior_beta` is larger, the posterior becomes sharper and concentrates more strongly around the best-scoring z positions. If it is smaller, the posterior becomes flatter and spreads probability over a wider range of z. Intuitively, this parameter controls how “decisive” the algorithm is when turning matching scores into a soft depth estimate: large values behave more like a hard choice, while small values behave more cautiously.
+The coarse matching model contains three main components: a moving encoder, a reference encoder, and a local query-to-volume matching module.
 
-#### `local_radius` (default = `3`)
-This defines the radius around the dominant peak when measuring how much posterior mass is concentrated near the main mode. It is used to judge whether the z-curve has one main plausible region or whether the probability is spread across multiple separated depths. A larger radius is more tolerant and counts a broader neighborhood as belonging to the main peak. A smaller radius is stricter and only rewards very concentrated peaks. Intuitively, this parameter controls how locally we define “most of the probability is around one main depth”.
+---
 
-#### `smoothness_alpha` (default = `6.0`)
-This controls how strongly rough or jagged z-score curves are penalized when computing confidence. If this value is larger, curves with strong second-order oscillation will lose confidence more aggressively. If it is smaller, even somewhat irregular curves will still retain confidence. Intuitively, this parameter controls how much the algorithm dislikes noisy, unstable z-curves.
+### Moving Encoder
 
-#### `regularization_lambda` (default = `1.0`)
-This is the strength of spatial regularization on the patch grid. After each patch gets its own soft depth estimate, neighboring patches are encouraged to agree with each other, especially when some patches are unreliable. A larger value means stronger spatial coupling, so low-confidence patches will follow neighboring reliable patches more strongly. A smaller value means each patch keeps its own estimate more independently. Intuitively, this parameter controls how much neighboring patches are encouraged to be consistent.
+The moving encoder extracts features from the sparse moving stack. Each moving slice is first processed by a 2D convolutional feature extractor. The extracted slice-wise features are then enhanced by window-based self-attention. This allows each moving slice to aggregate local contextual information while keeping the computation manageable.
 
-#### `regularization_iters` (default = `40`)
-This is the number of iterations used in the patch-grid regularization step. More iterations allow the spatial regularization effect to propagate further across the patch grid, leading to a more stabilized patch-wise depth field. Fewer iterations make the process weaker and more local. Intuitively, this parameter controls how fully the neighboring patches are allowed to “communicate” and smooth each other.
+The output of the moving encoder is a set of moving feature maps at a reduced spatial resolution. Control-grid query features are then sampled or pooled from these moving features. Each query represents a control point on the moving image and will later be matched against a local candidate region in the reference volume.
 
-#### `min_confidence` (default = `1e-3`)
-This is the lower bound on patch confidence. Even if a patch looks very unreliable, its confidence will not drop below this value. This prevents completely zeroing out a patch and avoids numerical problems or overly extreme behavior during fusion and regularization. Intuitively, this parameter ensures that every patch still contributes at least a tiny amount, even when the algorithm is not confident about it.
+The moving encoder therefore serves two purposes:
 
-#### Overall intuition
+1. It extracts discriminative local image features from each moving slice.
+2. It provides query tokens for the subsequent local matching stage.
 
-These parameters mainly affect three stages of the method. First, `overlap` and `smooth_sigma` control how the final dense z initialization is spatially sampled and smoothed. Second, `z_curve_sigma`, `posterior_beta`, `local_radius`, and `smoothness_alpha` control how the algorithm interprets the z-score curve for each patch, including how much it smooths the curve, how sharply it forms a posterior, and how it evaluates whether the curve is reliable. Third, `regularization_lambda`, `regularization_iters`, and `min_confidence` control how patch-wise depth estimates are regularized and fused together, especially in uncertain regions. In a very intuitive sense, these parameters together determine how much the algorithm trusts local evidence, how sharply it chooses depth, and how strongly it asks neighboring patches to agree.
+---
+
+### Reference Encoder
+
+The reference encoder extracts a 3D feature volume from the dense reference stack. The reference image is encoded into a lower-resolution feature representation in the XY dimensions, while the z dimension is preserved to maintain axial localization accuracy.
+
+After convolutional feature extraction, the reference feature volume is further enhanced by window-based 3D self-attention. This allows local volumetric context to be incorporated into the reference representation without requiring global attention over the entire volume.
+
+The reference encoder provides the memory features used during query-to-volume matching. For each moving query, local candidate features are sampled from this reference feature volume around the current estimated reference coordinate.
+
+The reference encoder therefore serves two purposes:
+
+1. It transforms the dense reference volume into a compact and informative 3D feature memory.
+2. It provides local candidate features for each moving query during matching.
+
+---
+
+### Local Query-to-volume Matching
+
+The matching module estimates the reference coordinate of each moving query. Given a query feature and its current reference coordinate estimate, the model samples a local 3D candidate window from the reference feature volume.
+
+Let the local candidate coordinates be
+
+$$
+\left\{
+\mathbf{c}_{m}
+\right\}_{m=1}^{M},
+$$
+
+where $$M$$ is the number of candidate points in the local search window. The matcher computes a score $$s_m$$ for each candidate using feature similarity, learned pairwise matching, relative offset encoding, and local cross-attention between the moving query and the sampled reference candidates.
+
+The candidate scores are converted into a probability distribution:
+
+$$
+p_m
+=
+\frac{
+\exp(s_m)
+}{
+\sum_{m'=1}^{M}
+\exp(s_{m'})
+}.
+$$
+
+The predicted coordinate is then obtained as the expectation over the local candidate coordinates:
+
+$$
+\hat{\mathbf{c}}
+=
+\sum_{m=1}^{M}
+p_m \mathbf{c}_m.
+$$
+
+This local matching process can be repeated for multiple refinement iterations. At each iteration, the previous predicted coordinate becomes the new local search center. In this way, the model progressively refines the coarse correspondence while keeping the search local and memory-efficient.
+
+---
+
+## Coarse-to-fine Registration Pipeline
+
+The final output of the learning-based model is the coarse coordinate field
+
+$$
+\phi^{coarse}(k,i,j)
+=
+\hat{\mathbf{c}}_{kij}.
+$$
+
+This coarse field is used as the initial mapping for the subsequent iterative optimization stage:
+
+$$
+\phi^0 = \phi^{coarse}.
+$$
+
+The complete pipeline is therefore
+
+$$
+I^{mov}, I^{ref}
+\rightarrow
+\mathbf{z}^{init}
+\rightarrow
+\phi^{coarse}
+\rightarrow
+\phi^{refined}
+\rightarrow
+\phi^{final}.
+$$
+
+The global fixed-spacing ZNCC provides a robust axial initialization, while the learning-based coarse model predicts a spatially varying 3D correspondence field. This initialization substantially reduces the search space for the following iterative registration and makes the subsequent refinement less sensitive to local minima.
 
 ## 2. How to escape from local optima
 
@@ -314,28 +389,150 @@ This parameter is used in the `"highresidual"` mode to keep only the highest-res
 #### Overall intuition
 These parameters mainly control how the algorithm identifies suspicious regions, how aggressively it filters or refines them, and how it expands them into a trap mask in reference space. The first group, such as `error_metric`, `mad_threshold`, `min_component_size`, and `bad_region_exclude_mode`, determines how wrong regions are detected and refined. The second group, including `expand_radius_xy`, `sigma_grad`, `intensity_k`, and `quantile_threshold_q`, determines how those detected regions are turned into a mask in reference space that prevents the optimization from repeatedly falling into the same local trap.
  
+# Pipeline
+
+The goal of the long-term registration pipeline is to repeatedly match pixels between a moving image sequence and a reference image. In our data, the reference image and the moving images do not always have the same intensity distribution, even when they describe the same biological structures. Therefore, direct intensity comparison is not always reliable. To make the registration more stable, we first adjust the reference image to better match the intensity distribution of the current moving image, and then perform pixel-level registration.
+
+The overall pipeline contains five main steps:
+
+1. split the input data into registration and biological-marker channels;
+2. estimate the initial axial correspondence between the sparse moving stack and the reference stack;
+3. adjust the reference intensity distribution to match the moving image;
+4. register each time point to the adjusted reference;
+5. apply the estimated mapping to the biological-marker channel and save the registered result.
+
+
+## 1. Initial Z-position estimation(compute once)
+
+The moving image is a sparse z-stack, while the reference image is a denser 3D stack. Before estimating the full spatial deformation, we first identify which reference slices correspond to the moving slices.
+
+Because the moving slices are acquired with a fixed spacing, we do not match each slice independently. Instead, we search for a globally consistent starting z-position. Once the first moving slice is assigned to a reference slice, the remaining moving slices are placed according to the known spacing.
+
+In simple terms, this step answers the question:
+
+> Where is this sparse moving stack located inside the dense reference stack?
+
+The output of this step is a vector of initial z positions:
+
+$$
+\mathbf{z}^{init}
+=
+\left(
+z_0^{init},
+z_1^{init},
+\ldots,
+z_{K-1}^{init}
+\right).
+$$
+
+These positions provide the initial 3D coordinate system for the following registration.
+
+---
+
+## 2. Reference intensity adjustment (most important)
+
+A key observation in our long-term data is that the reference image and the moving images can have different pixel intensity distributions. This difference may come from imaging condition changes, signal attenuation, background variation, or biological changes over time.
+
+If we directly compare the raw reference image with the moving image, the optimizer may interpret intensity differences as spatial mismatch. To reduce this problem, we adjust the reference intensity distribution before registration.
+
+Specifically, we compare the reference slices corresponding to the initial z positions with the current moving stack. We then learn a quantile-based intensity mapping from the reference image to the moving image. This mapping aligns the intensity statistics of the reference with those of the moving image.
+
+Intuitively, this step makes the reference image look more like the moving image in terms of pixel intensity, while keeping the reference geometry unchanged.
+
+After this adjustment, we obtain an intensity-adapted reference image:
+
+$$
+I^{ref}_{adj}.
+$$
+
+This adjusted reference is used for registration instead of the original reference image.
+
+---
+
+## 4. Frame-by-frame registration
+
+After the reference intensity adjustment, we register each moving frame to the adjusted reference image.
+
+For each time point, the pipeline performs the following operations:
+
+1. extract the current moving registration channel;
+2. build a foreground mask for the moving image;
+3. estimate the spatial mapping between the moving image and the adjusted reference;
+4. use the current mapping as a motion prior for the next frame.
+
+The registration estimates a mapping field:
+
+$$
+\phi_t(x,y,k)
+=
+\left(
+x^{ref},
+y^{ref},
+z^{ref}
+\right),
+$$
+
+which describes where each pixel in the moving sparse stack should be located in the reference coordinate system.
+
+The mapped reference image is then sampled using this mapping and compared with the current moving image. This produces the registered image for the current time point.
+
+Because the data are time-lapse images, adjacent frames usually have related motion. Therefore, after each frame is registered, part of the estimated motion is passed to the next frame as an initialization. This makes the registration more stable across time and reduces frame-to-frame inconsistency.
+
+---
+
+## 5. Applying the mapping to the biological-marker channel
+
+The deformation field is estimated using the registration channel, but the same spatial mapping can be applied to other channels.
+
+After the mapping $$\phi_t$$ is estimated, we apply it to the biological-marker reference channel. This produces a registered biological-marker image in the same coordinate system as the current moving frame.
+
+This is important because the biological-marker channel may be sparse, discontinuous, or less suitable for direct registration. By estimating the deformation from a more structural channel and applying it to the marker channel, we obtain a more reliable registered marker signal.
+
+For each frame, we save four images for inspection:
+
+1. the raw moving registration channel;
+2. the mapped registration channel;
+3. the raw moving biological-marker channel;
+4. the mapped biological-marker channel.
+
+This allows us to visually compare both the registration quality and the transformed biological signal.
+
+---
+
+## 6. Periodic reference intensity update
+
+During long-term imaging, the intensity distribution of the moving image may gradually change over time. Therefore, a single reference intensity adjustment at the first frame may not remain optimal for the entire sequence.
+
+To handle this, the pipeline periodically updates the reference intensity mapping. For example, after every fixed number of frames, the reference intensity distribution is re-mapped using either the current moving frame or the average of several recent frames.
+
+This update does not change the reference geometry. It only updates the intensity relationship between the reference image and the moving image.
+
+The purpose is to keep the registration comparison fair over time:
+
+> the optimizer should focus on spatial mismatch, not on artificial intensity mismatch.
+
+---
+
+## Summary
+
+The long-term registration pipeline repeatedly performs pixel matching between each moving frame and a reference image. Since the reference and moving images may have different intensity distributions, we first adjust the reference intensity to better match the moving image. Then we estimate a spatial mapping using the structural registration channel and apply the same mapping to the biological-marker channel.
+
+The complete process can be summarized as:
+
+$$
+I^{mov}_t
+\rightarrow
+I^{ref}_{adj}
+\rightarrow
+\phi_t
+\rightarrow
+I^{mapped}_t.
+$$
+
+Here, $$I^{mov}_t$$ is the moving image at time point $$t$$, $$I^{ref}_{adj}$$ is the intensity-adjusted reference image, $$\phi_t$$ is the estimated spatial mapping, and $$I^{mapped}_t$$ is the registered output.
+
+This design makes the pipeline robust to both spatial motion and intensity distribution changes, which are common in long-term biological imaging data.
+
+
 # Remaining Questions
 
-## 1. What is the true zRatio of the image?
-
-From my current experiments, setting `zRatio=1` yields good results. The true zRatio values I read from the annotation and raw data are different (and the $x$ and $y$ ratios also seem to differ; did I read them incorrectly?).
-
-## 2. The distribution is quite different, and I'm not sure what the exact reason is.
-
-Now we use histogram mapping to correct the pixels, but it depends on whether we have two sample-shape images. Or we just use a simple transform from the same plane to correct all the pixels.
-
-![result](images/Histgram.png)
-
-## 3. What I find strange from a biological perspective
-
-I'm now unable to find correspondences between the two images for some structures. We achieve relatively good results on dorsal and ventral data because there isn't significant motion in those datasets. However, it has become challenging for us to properly register all frames for the gut data.
-
-In my observation, the last three frames of the gut/raw data (slice 79) look quite similar. Currently, we use the 3rd frame as the reference, and we can register the 4th and 5th frames very well, but the first two frames cannot be properly aligned.
-
-I think the main issue is that the first two frames appear to contain an extra structure, as I circled in the figure. The last three frames all show a structure like two fingers pressed together. In contrast, the first frame shows a closed structure, which then breaks in the second frame, and splits into two lobes in the last three frames.
-
-![result](images/5frames_S79_gut_raw.png)
-
-From other slices, it seems that in the later frames, this tissue has moved to a very superior position (e.g., slice 69 of the 3rd frame). Given such a large deformation, I believe it will be very difficult for us to handle this registration.
-
-<img src="images/frame3_S69_gut_raw.png" alt="result" width="269" height="543">
