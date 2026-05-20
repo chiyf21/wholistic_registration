@@ -573,11 +573,12 @@ def Registration_v3(configPath='./configs/config.toml', parallel=True):
     out_mem = os.path.join(output_root, "membrane")
     out_ref = os.path.join(output_root, "reference")
     out_mot = os.path.join(output_root, "motion")
-
     IO.reset_dir(out_mem)
     if dual_channel:
         out_ca  = os.path.join(output_root, "calcium")
+        out_ca_ref = os.path.join(output_root, "calcium_reference")
         IO.reset_dir(out_ca)
+        IO.reset_dir(out_ca_ref)
     else:
         out_ca = None
     save_ref = bool(config['save_config']['save_ref'])
@@ -603,6 +604,7 @@ def Registration_v3(configPath='./configs/config.toml', parallel=True):
         mid_window_size_frames = int(mid_window_size * 60 * config['MetaData']['fps'] / frame_downsample)  # Convert to frames
     elif config['reference']['time_measurement'] == 'frame':
         mid_window_size_frames = int(mid_window_size / frame_downsample)  # Already in frames\
+        mid_window_size = mid_window_size / (60*config['MetaData']['fps'])  # Convert to minutes for printing
     else:
         raise ValueError("[ERROR]Invalid time_measurement in reference config.")
     # Calculate the middle window position
@@ -615,7 +617,7 @@ def Registration_v3(configPath='./configs/config.toml', parallel=True):
     # Read middle block from ND2 file
     # Channel 1 = membrane, channel 0 = calcium
     mid_stride = int(config['reference']['mid_stride'])
-    frames_mid = list(range(mid_start, mid_end+1))  # List of frames in middle window
+    frames_mid = list(range(mid_start, min(mid_end+1, len(process_frames))))  # List of frames in middle window
 
     # load all of the frames to the memory is so memory-comsuming, so we downsample the frames
     mem_mid_downsample = IO.readND2Frame(movingFilePath, [process_frames[i] for i in list(range(mid_start, mid_end, mid_stride))], downsampleZ, channel=1, xy_down=downsampleXY, verbose=False)
@@ -630,9 +632,13 @@ def Registration_v3(configPath='./configs/config.toml', parallel=True):
     print(f"[INFO]Loaded middle block frames {process_frames[frames_mid[0]]} to {process_frames[frames_mid[-1]]} with frames downsample {frame_downsample} ({mid_window_size} minutes)")
     
     # Compute initial reference image from middle block
-    ref_img = reference.compute_reference_from_block(mem_mid_downsample, config, ca_mid_downsample)
+    ref_img, indsort = reference.compute_reference_from_block(mem_mid_downsample, config, ca_mid_downsample)
     IO.write_volume_as_ome_tiff(
         ref_img, out_ref, 'ref',f"{process_frames[frames_mid[0]]}_{process_frames[frames_mid[-1]]}", configPath
+    )
+    if dual_channel:
+        IO.write_volume_as_ome_tiff(
+        np.mean(ca_mid_downsample[indsort,:],axis = 0), out_ref, 'Ca_ref',f"{process_frames[frames_mid[0]]}_{process_frames[frames_mid[-1]]}", configPath
     )
     print(f"[INFO]Computed initial reference image from middle block frames {process_frames[frames_mid[0]]} to {process_frames[frames_mid[-1]]} ({mid_window_size} minutes)")
 
@@ -658,7 +664,7 @@ def Registration_v3(configPath='./configs/config.toml', parallel=True):
     num_frames = len(frames_mid)
 
     for i in range(0, num_frames, batch_size):
-        batch_frames = [process_frames[j] for j in list(range(mid_start + i,mid_start + min(num_frames-1,i+batch_size)))]
+        batch_frames = [process_frames[j] for j in list(range(mid_start + i,mid_start + min(num_frames,i+batch_size)))]
         mem_batch = IO.readND2Frame(
             movingFilePath, batch_frames, downsampleZ,
             channel=1, xy_down=downsampleXY, verbose=False
@@ -1496,7 +1502,7 @@ def process_directional_chunks(
         # -------------------------------
         # Compute reference once per chunk
         # -------------------------------
-        ref_img = reference.compute_reference_from_block(
+        ref_img,indsort = reference.compute_reference_from_block(
             list(ref_windows_mem), config, list(ref_windows_ca)
         )
 

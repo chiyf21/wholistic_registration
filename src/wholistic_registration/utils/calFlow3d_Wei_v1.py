@@ -687,7 +687,6 @@ def getMotion(dat_mov, dat_ref, option, verbose=False):
                 ).reshape(
                     x, y, z
                 )  # Shape: (x, y, z)
-
             diff_motion = np.abs(motion_current - old_motion)
             max_diff_motion = np.max(diff_motion)
             error_log[f"layer_{layer}"]["max_diff_motion"].append(max_diff_motion)

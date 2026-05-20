@@ -112,4 +112,4 @@ def compute_reference_from_block(mem_block,config,ca_block = None):
         result = mem_ref
     
     # Return as NumPy array - use .get() for CuPy, or return directly for NumPy
-    return result.get() if hasattr(result, 'get') else result
+    return result.get() if hasattr(result, 'get') else result, indsort.get() if hasattr(indsort, 'get') else indsort

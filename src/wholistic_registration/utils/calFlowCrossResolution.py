@@ -191,7 +191,7 @@ def getSpatialGradientInOrgGrid(data_raw, coords_new):
     return Ix, Iy, Iz
 
 def getFlow3_withPenalty6(
-    Ixx, Ixy, Ixz, Iyy, Iyz, Izz, Ixt, Iyt, Izt, smoothPenaltySum, neiSum
+    Ixx, Ixy, Ixz, Iyy, Iyz, Izz, Ixt, Iyt, Izt, smoothPenaltySum, neiSum,verbose=False
 ):
     """
     Compute the flow with penalty and 3x3 matrix determinant using Lucas-Kanade method.
@@ -243,10 +243,10 @@ def getFlow3_withPenalty6(
 
     num_nans = cp.isnan(phi_gradient)
     if cp.sum(num_nans) > 0:
-        print(f"number of nans: {cp.sum(num_nans)}")
+        if verbose:
+            print(f"number of nans: {cp.sum(num_nans)}")
         phi_gradient[cp.isnan(phi_gradient)] = 0
     return phi_gradient
-
 
 def compute_new_grid(grid, r, motion_shape):
     """
@@ -340,361 +340,138 @@ def _patch_grid_regularization(
 
     return z
 
-def FindInitPhase_robust(
+def _global_zncc_scores(mov_feat, ref_feat, use_hann_weight=True, eps=1e-6):
+
+    H, W, K = mov_feat.shape
+    _, _, Z = ref_feat.shape
+
+    mov_feat = mov_feat.astype(cp.float32, copy=False)
+    ref_feat = ref_feat.astype(cp.float32, copy=False)
+
+    if use_hann_weight:
+        weight = calculate.hann2d(H, W).astype(cp.float32)
+    else:
+        weight = cp.ones((H, W), dtype=cp.float32)
+
+    weight = weight / (cp.sum(weight) + eps)
+
+    scores = cp.zeros((K, Z), dtype=cp.float32)
+
+    ref_mean = cp.sum(weight[:, :, None] * ref_feat, axis=(0, 1))  # (Z,)
+    ref_centered = ref_feat - ref_mean[None, None, :]
+    ref_var = cp.sum(weight[:, :, None] * ref_centered * ref_centered, axis=(0, 1))  # (Z,)
+
+    for k in range(K):
+        mov_k = mov_feat[:, :, k]
+
+        mov_mean = cp.sum(weight * mov_k)
+        mov_centered = mov_k - mov_mean
+        mov_var = cp.sum(weight * mov_centered * mov_centered)
+
+        numerator = cp.sum(
+            weight[:, :, None] * mov_centered[:, :, None] * ref_centered,
+            axis=(0, 1),
+        )
+
+        scores[k, :] = numerator / (cp.sqrt(mov_var * ref_var) + eps)
+
+    scores = cp.clip(scores, -1.0, 1.0)
+    return scores
+
+def FindInitZ_stack_global_fixed_spacing(
     data_mov,
     data_ref,
-    patch_size,
-    overlap=0.5,
-    smooth_sigma=20.0,
+    delta_ref_idx,
     use_gradient=True,
+    use_hann_weight=True,
+    direction=1,
     weight_eps=1e-6,
     return_debug=False,
-    #  robust-Z parameters
-    z_curve_sigma=1.0,
-    posterior_beta=12.0,
-    local_radius=3,
-    smoothness_alpha=6.0,
-    regularization_lambda=1.0,
-    regularization_iters=40,
-    min_confidence=1e-3,
 ):
-    """
-    Robust initialization of phase for a single moving slice.
+    mov = calculate.to_3d(data_mov)
+    ref = calculate.to_3d(data_ref)
 
-    Improvements over the original version
-    --------------------------------------
-    1) Use the whole ZNCC curve instead of hard argmax only.
-    2) Convert the smoothed ZNCC curve into a soft posterior over z.
-    3) Use posterior mean as patch-wise depth estimate.
-    4) Define confidence from multiple whole-curve statistics:
-       - evidence strength
-       - local posterior mass near the main mode
-       - curve smoothness
-    5) Apply confidence-weighted patch-grid regularization so that
-       low-confidence patches follow neighboring reliable patches.
-    6) Fuse the regularized patch-wise depth into a dense z-map.
-
-    Parameters
-    ----------
-    data_mov : cp.ndarray or np.ndarray
-        Moving slice, shape (H, W) or (H, W, 1).
-    data_ref : cp.ndarray or np.ndarray
-        Reference volume, shape (H, W, Z).
-    patch_size : int
-        Patch size along Y and X.
-    overlap : float, default=0.5
-        Patch overlap ratio in [0, 1).
-    smooth_sigma : float, default=20.0
-        Gaussian smoothing sigma for final dense z-map in XY.
-    use_gradient : bool, default=True
-        If True, use gradient magnitude for matching.
-    weight_eps : float, default=1e-6
-        Small epsilon to avoid division by zero.
-    return_debug : bool, default=False
-        If True, return detailed intermediate results.
-
-    New parameters
-    --------------
-    z_curve_sigma : float, default=1.0
-        Gaussian smoothing sigma along z for each patch's score curve.
-        This suppresses jagged local noise before posterior construction.
-    posterior_beta : float, default=12.0
-        Inverse temperature for converting scores into posterior weights.
-        Larger values make the posterior sharper.
-    local_radius : int, default=3
-        Radius around the dominant peak used to measure local posterior mass.
-        This helps distinguish broad/smooth peaks from separated multi-peaks.
-    smoothness_alpha : float, default=6.0
-        Controls how strongly rough score curves are penalized in confidence.
-    regularization_lambda : float, default=1.0
-        Strength of patch-grid spatial regularization.
-    regularization_iters : int, default=40
-        Number of iterations for patch-grid regularization.
-    min_confidence : float, default=1e-3
-        Lower bound on patch confidence.
-
-    Returns
-    -------
-    phase_init : np.ndarray
-        Initial phase, shape (H, W, 1, 3).
-    z_map_smooth : np.ndarray
-        Dense smoothed z map, shape (H, W).
-    debug : dict, optional
-        Returned only if return_debug=True.
-    """
-    # ------------------------------------------------------------------
-    # Normalize input shapes
-    # data_mov -> (H, W, 1)
-    # data_ref -> (H, W, Z)
-    # ------------------------------------------------------------------
-    mov = cp.asarray(calculate.to_3d(data_mov), dtype=cp.float32)
-    ref = cp.asarray(calculate.to_3d(data_ref), dtype=cp.float32)
-
-    H, W, Dm = mov.shape
+    H, W, K = mov.shape
     Hr, Wr, Z = ref.shape
 
-    if Dm != 1:
-        raise ValueError(f"data_mov must represent a single slice, got shape {mov.shape}")
     if (H, W) != (Hr, Wr):
         raise ValueError(
             f"XY size mismatch: data_mov has {(H, W)}, data_ref has {(Hr, Wr)}"
         )
-    if not (0 <= overlap < 1):
-        raise ValueError("overlap must be in [0, 1).")
-    if patch_size > H or patch_size > W:
-        raise ValueError(
-            f"patch_size={patch_size} is larger than input size {(H, W)}"
-        )
+
+    if K < 1:
+        raise ValueError("Moving input must have at least one slice.")
+
     if Z < 1:
-        raise ValueError("Reference volume must have at least one z slice.")
+        raise ValueError("Reference input must have at least one slice.")
 
-    # ------------------------------------------------------------------
-    # Feature transform
-    # ------------------------------------------------------------------
-    mov2d = mov[:, :, 0]
-
+    # ------------------------------------------------------------
+    # 1. feature transform
+    # ------------------------------------------------------------
     if use_gradient:
-        mov_feat = calculate.grad_mag_2d(mov2d)
-
+        mov_feat = cp.stack(
+            [calculate.grad_mag_2d(mov[:, :, k]) for k in range(K)],
+            axis=2,
+        )
         ref_feat = cp.stack(
             [calculate.grad_mag_2d(ref[:, :, z]) for z in range(Z)],
-            axis=2
+            axis=2,
         )
     else:
-        mov_feat = mov2d.astype(cp.float32, copy=False)
+        mov_feat = mov.astype(cp.float32, copy=False)
         ref_feat = ref.astype(cp.float32, copy=False)
 
-    # ------------------------------------------------------------------
-    # Patch grid
-    # ------------------------------------------------------------------
-    step = max(int(round(patch_size * (1.0 - overlap))), 1)
-
-    ys = cp.arange(0, H - patch_size + 1, step, dtype=cp.int32)
-    xs = cp.arange(0, W - patch_size + 1, step, dtype=cp.int32)
-
-    if ys.size == 0 or int(ys[-1]) != H - patch_size:
-        ys = cp.unique(cp.concatenate([ys, cp.asarray([H - patch_size], dtype=cp.int32)]))
-    if xs.size == 0 or int(xs[-1]) != W - patch_size:
-        xs = cp.unique(cp.concatenate([xs, cp.asarray([W - patch_size], dtype=cp.int32)]))
-
-    Ny = ys.size
-    Nx = xs.size
-    P = patch_size
-
-    # ------------------------------------------------------------------
-    # Extract patch tensors
-    # mov_windows: (H-P+1, W-P+1, P, P)
-    # ref_windows: typically (H-P+1, W-P+1, Z, P, P)
-    # ------------------------------------------------------------------
-    mov_windows = cp.lib.stride_tricks.sliding_window_view(mov_feat, (P, P))
-    ref_windows = cp.lib.stride_tricks.sliding_window_view(ref_feat, (P, P), axis=(0, 1))
-
-    mov_patches = mov_windows[ys[:, None], xs[None, :], :, :]        # (Ny, Nx, P, P)
-    ref_patches = ref_windows[ys[:, None], xs[None, :], ...]         # (Ny, Nx, Z, P, P)
-
-    if ref_patches.ndim != 5:
-        raise RuntimeError(
-            f"Unexpected ref_patches shape {ref_patches.shape}; "
-            "please inspect sliding_window_view output layout."
-        )
-    if ref_patches.shape[-2:] != (P, P):
-        raise RuntimeError(
-            f"Unexpected ref_patches patch dims {ref_patches.shape[-2:]}, expected {(P, P)}"
-        )
-
-    # ------------------------------------------------------------------
-    # Weighted ZNCC across patch_y, patch_x, candidate_z
-    # ------------------------------------------------------------------
-    weight_patch = cp.asarray(calculate.hann2d(P, P), dtype=cp.float32)
-    weight_patch = weight_patch[None, None, None, :, :]  # (1,1,1,P,P)
-
-    mov_patches_exp = mov_patches[:, :, None, :, :]      # (Ny,Nx,1,P,P)
-
-    wsum = cp.sum(weight_patch, axis=(-2, -1), keepdims=True) + weight_eps
-
-    mov_mean = cp.sum(weight_patch * mov_patches_exp, axis=(-2, -1), keepdims=True) / wsum
-    ref_mean = cp.sum(weight_patch * ref_patches, axis=(-2, -1), keepdims=True) / wsum
-
-    mov_centered = mov_patches_exp - mov_mean
-    ref_centered = ref_patches - ref_mean
-
-    numerator = cp.sum(weight_patch * mov_centered * ref_centered, axis=(-2, -1))
-    mov_denom = cp.sum(weight_patch * mov_centered * mov_centered, axis=(-2, -1))
-    ref_denom = cp.sum(weight_patch * ref_centered * ref_centered, axis=(-2, -1))
-
-    scores_raw = numerator / (cp.sqrt(mov_denom * ref_denom) + weight_eps)  # (Ny, Nx, Z)
-    scores_raw = cp.clip(scores_raw, -1.0, 1.0)
-
-    # ------------------------------------------------------------------
-    # 1D smoothing along z: suppress jagged noise while preserving
-    # broader peak / slope structure.
-    # ------------------------------------------------------------------
-    if Z >= 3 and z_curve_sigma > 0:
-        scores_smooth = cupy_ndimage.gaussian_filter1d(
-            scores_raw,
-            sigma=z_curve_sigma,
-            axis=2,
-            mode="nearest"
-        )
-    else:
-        scores_smooth = scores_raw
-
-    # ------------------------------------------------------------------
-    # Convert whole ZNCC curve into a soft posterior over z
-    # posterior(z) ∝ exp(beta * score(z))
-    # ------------------------------------------------------------------
-    posterior_logits = posterior_beta * scores_smooth
-    posterior = _softmax_stable(posterior_logits, axis=2, eps=weight_eps)   # (Ny, Nx, Z)
-
-    z_axis = cp.arange(Z, dtype=cp.float32)[None, None, :]
-
-    # Soft patch-wise depth estimate: posterior mean
-    mu_patch = cp.sum(posterior * z_axis, axis=2)                            # (Ny, Nx)
-
-    # Posterior variance: optional diagnostic
-    var_patch = cp.sum(posterior * (z_axis - mu_patch[:, :, None]) ** 2, axis=2)
-
-    # Dominant mode index from smoothed curve
-    peak_idx = cp.argmax(scores_smooth, axis=2).astype(cp.int32)
-    peak_val = cp.max(scores_smooth, axis=2)
-    median_val = cp.median(scores_smooth, axis=2)
-    min_val = cp.min(scores_smooth, axis=2)
-
-    # ------------------------------------------------------------------
-    # Confidence from whole-curve features
-    #
-    # (1) Evidence strength:
-    #     whether the curve has a meaningful elevation above its baseline.
-    # ------------------------------------------------------------------
-    evidence = (peak_val - median_val) / (1.0 - median_val + weight_eps)
-    evidence = cp.clip(evidence, 0.0, 1.0)
-
-    # ------------------------------------------------------------------
-    # (2) Local posterior mass around the dominant mode:
-    #     high for a single sharp peak or a smooth broad peak,
-    #     lower for separated multi-modal ambiguity.
-    # ------------------------------------------------------------------
-    if Z == 1:
-        local_mass = cp.ones((Ny, Nx), dtype=cp.float32)
-    else:
-        z_idx = cp.arange(Z, dtype=cp.int32)[None, None, :]
-        mask_local = cp.abs(z_idx - peak_idx[:, :, None]) <= int(local_radius)
-        local_mass = cp.sum(posterior * mask_local.astype(cp.float32), axis=2)
-        local_mass = cp.clip(local_mass, 0.0, 1.0)
-
-    # ------------------------------------------------------------------
-    # (3) Smoothness quality:
-    #     penalize curves with strong jagged second-order oscillation.
-    #     A smooth broad hill should remain high-quality.
-    # ------------------------------------------------------------------
-    if Z >= 3:
-        second_diff = scores_smooth[:, :, 2:] - 2.0 * scores_smooth[:, :, 1:-1] + scores_smooth[:, :, :-2]
-        roughness = cp.mean(cp.abs(second_diff), axis=2)
-        amplitude = peak_val - min_val
-        roughness_norm = roughness / (amplitude + weight_eps)
-        smoothness_quality = cp.exp(-smoothness_alpha * roughness_norm)
-    else:
-        smoothness_quality = cp.ones((Ny, Nx), dtype=cp.float32)
-
-    # ------------------------------------------------------------------
-    # Final confidence:
-    #   evidence × averaged shape quality
-    # This keeps:
-    #   - sharp/high peaks -> high confidence
-    #   - broad/smooth peaks -> still high confidence
-    #   - globally weak curves -> low confidence
-    #   - jagged/noisy spikes -> suppressed confidence
-    # ------------------------------------------------------------------
-    shape_quality = 0.5 * local_mass + 0.5 * smoothness_quality
-    confidence = evidence * shape_quality
-    confidence = cp.clip(confidence, min_confidence, 1.0).astype(cp.float32)
-
-    # ------------------------------------------------------------------
-    # Patch-grid spatial regularization
-    # Low-confidence patches follow neighbors more strongly.
-    # ------------------------------------------------------------------
-    z_patch_reg = _patch_grid_regularization(
-        mu_patch=mu_patch,
-        conf_patch=confidence,
-        lam=regularization_lambda,
-        num_iters=regularization_iters,
+    scores = _global_zncc_scores(
+        mov_feat=mov_feat,
+        ref_feat=ref_feat,
+        use_hann_weight=use_hann_weight,
         eps=weight_eps,
-    )
-    z_patch_reg = cp.clip(z_patch_reg, 0.0, float(Z - 1)).astype(cp.float32)
+    )  # (K, Z)
 
-    # ------------------------------------------------------------------
-    # Dense fusion by overlap-weighted voting
-    # Each patch now votes with its regularized soft depth estimate.
-    # ------------------------------------------------------------------
-    yy_local = cp.arange(P, dtype=cp.int32)
-    xx_local = cp.arange(P, dtype=cp.int32)
+    offsets = cp.arange(K, dtype=cp.float32) * float(delta_ref_idx) * float(direction)
 
-    y_idx = ys[:, None, None, None] + yy_local[None, None, :, None]
-    x_idx = xs[None, :, None, None] + xx_local[None, None, None, :]
+    min_offset = cp.min(offsets)
+    max_offset = cp.max(offsets)
 
-    y_idx = cp.broadcast_to(y_idx, (Ny, Nx, P, P))
-    x_idx = cp.broadcast_to(x_idx, (Ny, Nx, P, P))
+    z0_min = int(cp.ceil(-min_offset).item())
+    z0_max = int(cp.floor((Z - 1) - max_offset).item())
 
-    linear_idx = (y_idx * W + x_idx).reshape(-1)
+    if z0_max < z0_min:
+        raise ValueError(
+            f"No valid z0 exists. Z={Z}, K={K}, delta_ref_idx={delta_ref_idx}. "
+            f"Need reference z range >= {(K - 1) * abs(delta_ref_idx) + 1}."
+        )
 
-    vote_weight = cp.asarray(calculate.hann2d(P, P), dtype=cp.float32)[None, None, :, :]
-    vote_weight = vote_weight * confidence[:, :, None, None]
+    best_score = -cp.inf
+    best_z_init = None
+    best_z0 = None
 
-    z_vote = vote_weight * z_patch_reg[:, :, None, None]
+    for z0 in range(z0_min, z0_max + 1):
+        z_init = z0 + offsets
 
-    z_accum = cp.zeros((H * W,), dtype=cp.float32)
-    w_accum = cp.zeros((H * W,), dtype=cp.float32)
+        z_idx = cp.rint(z_init).astype(cp.int32)
 
-    cp.add.at(z_accum, linear_idx, z_vote.reshape(-1))
-    cp.add.at(w_accum, linear_idx, vote_weight.reshape(-1))
+        score = cp.sum(scores[cp.arange(K), z_idx])
 
-    z_map = (z_accum / (w_accum + weight_eps)).reshape(H, W)
+        if score > best_score:
+            best_score = score
+            best_z_init = z_init.copy()
+            best_z0 = z0
 
-    global_fill = cp.sum(z_accum) / (cp.sum(w_accum) + weight_eps)
-    z_map = cp.where(w_accum.reshape(H, W) > weight_eps, z_map, global_fill)
-
-    # ------------------------------------------------------------------
-    # Final XY smoothing on dense z-map
-    # ------------------------------------------------------------------
-    z_map_smooth = cupy_ndimage.gaussian_filter(z_map, sigma=smooth_sigma)
-    z_map_smooth = cp.clip(z_map_smooth, 0.0, float(Z - 1)).astype(cp.float32)
-
-    # ------------------------------------------------------------------
-    # Build phase_init
-    # ------------------------------------------------------------------
-    Y, X = cp.meshgrid(
-        cp.arange(H, dtype=cp.float32),
-        cp.arange(W, dtype=cp.float32),
-        indexing="ij"
-    )
-
-    phase_init = cp.zeros((H, W, 1, 3), dtype=cp.float32)
-    phase_init[:, :, 0, 0] = Y
-    phase_init[:, :, 0, 1] = X
-    phase_init[:, :, 0, 2] = z_map_smooth
+    z_init_np = cp.asnumpy(best_z_init).astype(np.uint16)
 
     if return_debug:
         debug = {
-            "ys": ys.get(),
-            "xs": xs.get(),
-            "scores_raw": scores_raw.get(),
-            "scores_smooth": scores_smooth.get(),
-            "posterior": posterior.get(),
-            "mu_patch": mu_patch.get(),
-            "var_patch": var_patch.get(),
-            "peak_idx": peak_idx.get(),
-            "peak_val": peak_val.get(),
-            "median_val": median_val.get(),
-            "evidence": evidence.get(),
-            "local_mass": local_mass.get(),
-            "smoothness_quality": smoothness_quality.get(),
-            "confidence": confidence.get(),
-            "z_patch_reg": z_patch_reg.get(),
-            "z_map_raw": z_map.get(),
+            "scores": cp.asnumpy(scores),
+            "best_score": float(best_score.get()),
+            "best_z0": int(best_z0),
+            "delta_ref_idx": float(delta_ref_idx),
+            "direction": int(direction),
         }
-        return phase_init.get(), z_map_smooth.get(), debug
+        return z_init_np, debug
 
-    return phase_init.get(), z_map_smooth.get()
+    return z_init_np
+
 
 def generate_continuous_H_gpu(stack, zRatio):
     """
@@ -760,8 +537,6 @@ def correctMotion(data_raw, motion_field):
 
     return data_tran
 
-
-
 # 1. Wrong-region detection helpers
 def get_local_error_on_control_points(It, xG_grid, yG_grid, zG_grid,
                                       kernelsize=11, metric="mse"):
@@ -826,7 +601,7 @@ def _normalize_vec_field(vx, vy, vz, eps=1e-6):
     norm = cp.sqrt(vx**2 + vy**2 + vz**2) + eps
     return vx / norm, vy / norm, vz / norm
 
-def get_wrong_regions_2d(err2d, r, xG, yG, x_threshold, y_threshold,
+def get_wrong_regions(err2d, r, xG, yG, x_threshold, y_threshold,
                          mad_threshold=3.0, min_component_size=2):
     """
     Detect connected high-error regions on one z slice of control-point error map.
@@ -958,7 +733,7 @@ def _connected_grow(seed_mask, allowed_mask, structure, max_steps):
         region = grown
     return region
 
-def build_reference_trap_mask_from_bad_moving(
+def build_reference_trap_mask_from_bad_moving_fast_roi(
     bad_mask,
     phase_new,
     data_ref_layer,
@@ -968,33 +743,23 @@ def build_reference_trap_mask_from_bad_moving(
     intensity_k=2.5,
 ):
     """
-    Minimal connected trap-mask construction.
+    ROI-first trap-mask construction.
 
-    Parameters
-    ----------
-    bad_mask : cp.ndarray, bool, shape (x, y, z_mov)
-        Bad region on moving grid.
-    phase_new : cp.ndarray, shape (x, y, z_mov, 3)
-        Current mapping from moving grid to reference coordinates.
-    data_ref_layer : cp.ndarray, shape (x_ref, y_ref, z_ref)
-        Reference image on current pyramid layer.
-    z_ratio_ref : float
-        Physical z anisotropy on this layer.
-    expand_radius_xy : int
-        Max growth distance from the initial mapped seed, measured in xy voxels.
-    sigma_grad : float
-        Mild Gaussian smoothing before intensity comparison.
-    intensity_k : float
-        Intensity tolerance multiplier. Larger -> easier to grow.
+    Compared with build_reference_trap_mask_from_bad_moving:
+    - Do not create full-volume seed_mask_ref.
+    - Do not run binary_closing on the full reference volume.
+    - Compute seed bbox directly from seed coordinates.
+    - Create seed_crop only inside local ROI.
+    - Run closing / smoothing / distance transform / growth only inside ROI.
     """
     x_ref, y_ref, z_ref = data_ref_layer.shape
     trap_mask_ref = cp.zeros((x_ref, y_ref, z_ref), dtype=cp.bool_)
 
-    if not cp.any(bad_mask):
+    if not bool(cp.any(bad_mask).item()):
         return trap_mask_ref
 
     # ------------------------------------------------------------
-    # 1) moving bad mask -> reference seed mask
+    # 1) moving bad mask -> reference seed coordinates
     # ------------------------------------------------------------
     seed_coords = phase_new[bad_mask]
     if seed_coords.shape[0] == 0:
@@ -1009,6 +774,7 @@ def build_reference_trap_mask_from_bad_moving(
         (seed_y >= 0) & (seed_y < y_ref) &
         (seed_z >= 0) & (seed_z < z_ref)
     )
+
     seed_x = seed_x[keep]
     seed_y = seed_y[keep]
     seed_z = seed_z[keep]
@@ -1016,26 +782,15 @@ def build_reference_trap_mask_from_bad_moving(
     if seed_x.size == 0:
         return trap_mask_ref
 
-    seed_mask_ref = cp.zeros((x_ref, y_ref, z_ref), dtype=cp.bool_)
-    seed_mask_ref[seed_x, seed_y, seed_z] = True
-
-    # very mild cleanup only
-    structure_small = _make_ball(1, z_ratio_ref)
-    seed_mask_ref = cupy_ndimage.binary_closing(seed_mask_ref, structure=structure_small)
-
-    if not cp.any(seed_mask_ref):
-        return trap_mask_ref
-
     # ------------------------------------------------------------
-    # 2) local ROI around the seed
+    # 2) compute ROI directly from seed coordinates
     # ------------------------------------------------------------
-    seed_idx = cp.argwhere(seed_mask_ref)
-    xmin = int(seed_idx[:, 0].min().item())
-    xmax = int(seed_idx[:, 0].max().item())
-    ymin = int(seed_idx[:, 1].min().item())
-    ymax = int(seed_idx[:, 1].max().item())
-    zmin = int(seed_idx[:, 2].min().item())
-    zmax = int(seed_idx[:, 2].max().item())
+    xmin = int(seed_x.min().item())
+    xmax = int(seed_x.max().item())
+    ymin = int(seed_y.min().item())
+    ymax = int(seed_y.max().item())
+    zmin = int(seed_z.min().item())
+    zmax = int(seed_z.max().item())
 
     margin_xy = int(max(1, expand_radius_xy + 2))
     margin_z = int(max(1, round((expand_radius_xy + 2) * z_ratio_ref)))
@@ -1047,104 +802,316 @@ def build_reference_trap_mask_from_bad_moving(
     z0 = max(0, zmin - margin_z)
     z1 = min(z_ref, zmax + margin_z + 1)
 
-    ref_crop = data_ref_layer[x0:x1, y0:y1, z0:z1].astype(cp.float32)
-    seed_crop = seed_mask_ref[x0:x1, y0:y1, z0:z1]
+    # ------------------------------------------------------------
+    # 3) create seed mask only inside ROI
+    # ------------------------------------------------------------
+    seed_crop = cp.zeros((x1 - x0, y1 - y0, z1 - z0), dtype=cp.bool_)
 
-    if not cp.any(seed_crop):
+    seed_x_local = seed_x - x0
+    seed_y_local = seed_y - y0
+    seed_z_local = seed_z - z0
+
+    seed_crop[seed_x_local, seed_y_local, seed_z_local] = True
+
+    structure_small = _make_ball(1, z_ratio_ref)
+    seed_crop = cupy_ndimage.binary_closing(seed_crop, structure=structure_small)
+
+    if not bool(cp.any(seed_crop).item()):
         return trap_mask_ref
 
     # ------------------------------------------------------------
-    # 3) smooth reference a little
+    # 4) crop reference only after ROI is known
     # ------------------------------------------------------------
-    ref_sm = cupy_ndimage.gaussian_filter(
-        ref_crop,
-        sigma=(sigma_grad, sigma_grad, sigma_grad)
-    )
+    ref_crop = data_ref_layer[x0:x1, y0:y1, z0:z1].astype(cp.float32)
 
     # ------------------------------------------------------------
-    # 4) robust seed intensity statistics
+    # 5) smooth reference inside ROI
+    # ------------------------------------------------------------
+    if sigma_grad > 0:
+        ref_sm = cupy_ndimage.gaussian_filter(
+            ref_crop,
+            sigma=(sigma_grad, sigma_grad, sigma_grad)
+        )
+    else:
+        ref_sm = ref_crop
+
+    # ------------------------------------------------------------
+    # 6) robust seed intensity statistics
     # ------------------------------------------------------------
     seed_vals = ref_sm[seed_crop]
+    if seed_vals.size == 0:
+        return trap_mask_ref
+
     I_med = float(cp.median(seed_vals).item())
     I_mad = float(cp.median(cp.abs(seed_vals - I_med)).item())
 
-    # automatic intensity tolerance
     tol = max(intensity_k * 1.4826 * I_mad, 1e-3)
 
     # ------------------------------------------------------------
-    # 5) distance-to-seed constraint
+    # 7) distance-to-seed constraint inside ROI
     # ------------------------------------------------------------
-    dist_to_seed = cupy_ndimage.distance_transform_edt(
-        ~seed_crop,
-        sampling=(1.0, 1.0, 1.0 / max(z_ratio_ref, 1e-6))
-    ).astype(cp.float32)
+    near_structure = _make_ball(
+        radius_xy=max(1, int(round(expand_radius_xy))),
+        z_ratio=z_ratio_ref,
+    )
 
-    # only allow nearby voxels
-    near_mask = dist_to_seed <= float(expand_radius_xy)
-
-    # only allow intensities similar to the seed region
+    near_mask = cupy_ndimage.binary_dilation(
+        seed_crop,
+        structure=near_structure,
+        iterations=1,
+    )
+    # ------------------------------------------------------------
+    # 8) intensity similarity constraint
+    # ------------------------------------------------------------
     intensity_mask = cp.abs(ref_sm - I_med) <= tol
 
-    # allowed region for growth
     allowed_mask = (near_mask & intensity_mask) | seed_crop
 
     # ------------------------------------------------------------
-    # 6) connected growth from seed
+    # 9) connected growth from seed inside ROI
     # ------------------------------------------------------------
     grow_structure = _make_ball(1, z_ratio_ref)
     region = _connected_grow(
         seed_mask=seed_crop,
         allowed_mask=allowed_mask,
         structure=grow_structure,
-        max_steps=expand_radius_xy
+        max_steps=expand_radius_xy,
     )
 
-    # keep the seed for sure
     region = region | seed_crop
 
+    # ------------------------------------------------------------
+    # 10) paste local trap mask back to full reference space
+    # ------------------------------------------------------------
     trap_mask_ref[x0:x1, y0:y1, z0:z1] = region
+
     return trap_mask_ref
 
-def build_bad_region_mask_from_cp_error(err_cp, r, xG, yG, x_size, y_size,
-                                        mad_threshold=3.0, min_component_size=2):
+def build_bad_region_mask_from_cp_error(
+    err_cp,
+    r,
+    xG,
+    yG,
+    x_size,
+    y_size,
+    mad_threshold=3.0,
+    min_component_size=2,
+    exclude_border_if_large=True,
+    large_cp_threshold=144,
+    eps=1e-12,
+):
     """
-    Convert control-point error volume into a dense bad-region mask on moving grid.
+    Fast GPU version of build_bad_region_mask_from_cp_error.
 
     Parameters
     ----------
     err_cp : cp.ndarray, shape (nx_cp, ny_cp, z)
         Error on control points.
-    r, xG, yG : control-point geometry
+
+    r : int or float
+        Control-point radius.
+
+    xG, yG : cp.ndarray or array-like
+        1D control-point coordinates in dense moving-image grid.
+        xG corresponds to err_cp axis 0.
+        yG corresponds to err_cp axis 1.
+
     x_size, y_size : int
-        Image size.
-    mad_threshold, min_component_size : region-detection params
+        Dense moving-image size.
+
+    mad_threshold : float
+        MAD threshold for abnormal control points.
+
+    min_component_size : int
+        Minimum connected-component size on control-point grid.
 
     Returns
     -------
-    bad_mask : cp.ndarray, shape (x, y, z), bool
-        Dense moving-grid mask: True = bad / exclude from data term.
+    bad_mask : cp.ndarray, shape (x_size, y_size, z_size), bool
+        Dense moving-grid mask.
+
     num_regions_total : int
-        Total number of detected regions across z.
+        Number of kept connected components.
     """
-    z_size = err_cp.shape[2]
-    bad_mask = cp.zeros((x_size, y_size, z_size), dtype=cp.bool_)
-    num_regions_total = 0
+    if not isinstance(err_cp, cp.ndarray):
+        err_cp = cp.asarray(err_cp)
 
-    for z_i in range(z_size):
-        err2d = err_cp[:, :, z_i]
-        regions, _ = get_wrong_regions_2d(
-            err2d, r, xG, yG, x_size, y_size,
-            mad_threshold=mad_threshold,
-            min_component_size=min_component_size
-        )
-        num_regions_total += len(regions)
+    xG = cp.asarray(xG).astype(cp.int32)
+    yG = cp.asarray(yG).astype(cp.int32)
 
-        for reg in regions:
-            min_y, max_y, min_x, max_x = map(int, reg.tolist())
-            bad_mask[min_x:max_x + 1, min_y:max_y + 1, z_i] = True
+    nx, ny, z_size = err_cp.shape
+
+    if err_cp.size == 0:
+        return cp.zeros((x_size, y_size, z_size), dtype=cp.bool_), 0
+
+    # ------------------------------------------------------------
+    # 1. Build significant control-point mask on GPU
+    #    Same idea as original code:
+    #    if control-point grid is large, ignore border control points.
+    # ------------------------------------------------------------
+    sig_mask = cp.zeros((nx, ny, z_size), dtype=cp.bool_)
+
+    use_inner = (
+        exclude_border_if_large
+        and nx * ny > large_cp_threshold
+        and nx > 2
+        and ny > 2
+    )
+
+    if use_inner:
+        err_use = err_cp[1:-1, 1:-1, :]
+        flat = err_use.reshape(-1, z_size)
+
+        med = cp.median(flat, axis=0)
+        mad = cp.median(cp.abs(flat - med[None, :]), axis=0)
+
+        robust_z = cp.abs(flat - med[None, :]) / (1.4826 * mad[None, :] + eps)
+
+        sig_flat = robust_z > mad_threshold
+        sig_flat[:, mad < eps] = False
+
+        sig_mask[1:-1, 1:-1, :] = sig_flat.reshape(nx - 2, ny - 2, z_size)
+
+    else:
+        flat = err_cp.reshape(-1, z_size)
+
+        med = cp.median(flat, axis=0)
+        mad = cp.median(cp.abs(flat - med[None, :]), axis=0)
+
+        robust_z = cp.abs(flat - med[None, :]) / (1.4826 * mad[None, :] + eps)
+
+        sig_flat = robust_z > mad_threshold
+        sig_flat[:, mad < eps] = False
+
+        sig_mask = sig_flat.reshape(nx, ny, z_size)
+
+    if not bool(cp.any(sig_mask).item()):
+        return cp.zeros((x_size, y_size, z_size), dtype=cp.bool_), 0
+
+    # ------------------------------------------------------------
+    # 2. Connected component labeling on GPU.
+    #
+    # Important:
+    # structure only connects in x-y plane, not across z.
+    # This preserves your old per-z connected-component behavior.
+    # ------------------------------------------------------------
+    structure = cp.zeros((3, 3, 3), dtype=cp.bool_)
+    structure[:, :, 1] = cp.asarray(
+        [[0, 1, 0],
+         [1, 1, 1],
+         [0, 1, 0]],
+        dtype=cp.bool_,
+    )
+
+    labels, nlab = cupy_ndimage.label(sig_mask, structure=structure)
+    nlab = int(nlab)
+
+    if nlab == 0:
+        return cp.zeros((x_size, y_size, z_size), dtype=cp.bool_), 0
+
+    # ------------------------------------------------------------
+    # 3. Filter small components.
+    # ------------------------------------------------------------
+    label_flat = labels.ravel()
+
+    sizes = cp.bincount(label_flat, minlength=nlab + 1)
+    keep_label = sizes >= min_component_size
+    keep_label[0] = False
+
+    kept_labels = cp.nonzero(keep_label)[0]
+    num_regions_total = int(kept_labels.size)
+
+    if num_regions_total == 0:
+        return cp.zeros((x_size, y_size, z_size), dtype=cp.bool_), 0
+
+    # ------------------------------------------------------------
+    # 4. Compute component bbox on GPU.
+    # ------------------------------------------------------------
+    rr, cc, zz = cp.nonzero(labels > 0)
+    labs = labels[rr, cc, zz].astype(cp.int32)
+
+    valid = keep_label[labs]
+    rr = rr[valid].astype(cp.int32)
+    cc = cc[valid].astype(cp.int32)
+    zz = zz[valid].astype(cp.int32)
+    labs = labs[valid]
+
+    inf = cp.asarray(10**9, dtype=cp.int32)
+
+    min_r = cp.full(nlab + 1, inf, dtype=cp.int32)
+    max_r = cp.full(nlab + 1, -1, dtype=cp.int32)
+    min_c = cp.full(nlab + 1, inf, dtype=cp.int32)
+    max_c = cp.full(nlab + 1, -1, dtype=cp.int32)
+    min_z = cp.full(nlab + 1, inf, dtype=cp.int32)
+    max_z = cp.full(nlab + 1, -1, dtype=cp.int32)
+
+    cp.minimum.at(min_r, labs, rr)
+    cp.maximum.at(max_r, labs, rr)
+    cp.minimum.at(min_c, labs, cc)
+    cp.maximum.at(max_c, labs, cc)
+    cp.minimum.at(min_z, labs, zz)
+    cp.maximum.at(max_z, labs, zz)
+
+    labs_keep = kept_labels.astype(cp.int32)
+
+    min_r = min_r[labs_keep]
+    max_r = max_r[labs_keep]
+    min_c = min_c[labs_keep]
+    max_c = max_c[labs_keep]
+    min_z = min_z[labs_keep]
+    max_z = max_z[labs_keep]
+
+    # Because we used no z-connectivity, each component should live in one z slice.
+    # But keep min_z/max_z for safety.
+    dx = int(cp.ceil(cp.asarray(1.5 * r)).item())
+
+    min_x = cp.maximum(0, xG[min_r] - dx)
+    max_x = cp.minimum(x_size - 1, xG[max_r] + dx)
+    min_y = cp.maximum(0, yG[min_c] - dx)
+    max_y = cp.minimum(y_size - 1, yG[max_c] + dx)
+
+    min_z = cp.maximum(0, min_z)
+    max_z = cp.minimum(z_size - 1, max_z)
+
+    # ------------------------------------------------------------
+    # 5. Dense mask construction using 3D difference array.
+    #
+    # This avoids Python loop like:
+    #     bad_mask[min_x:max_x+1, min_y:max_y+1, z] = True
+    #
+    # Since components do not connect across z, usually min_z == max_z.
+    # But this implementation supports z intervals too.
+    # ------------------------------------------------------------
+    diff = cp.zeros((x_size + 1, y_size + 1, z_size + 1), dtype=cp.int32)
+
+    x0 = min_x.astype(cp.int32)
+    x1 = (max_x + 1).astype(cp.int32)
+    y0 = min_y.astype(cp.int32)
+    y1 = (max_y + 1).astype(cp.int32)
+    z0 = min_z.astype(cp.int32)
+    z1 = (max_z + 1).astype(cp.int32)
+
+    cp.add.at(diff, (x0, y0, z0), 1)
+    cp.add.at(diff, (x1, y0, z0), -1)
+    cp.add.at(diff, (x0, y1, z0), -1)
+    cp.add.at(diff, (x0, y0, z1), -1)
+
+    cp.add.at(diff, (x1, y1, z0), 1)
+    cp.add.at(diff, (x1, y0, z1), 1)
+    cp.add.at(diff, (x0, y1, z1), 1)
+    cp.add.at(diff, (x1, y1, z1), -1)
+
+    bad_mask = cp.cumsum(
+        cp.cumsum(
+            cp.cumsum(diff, axis=0),
+            axis=1,
+        ),
+        axis=2,
+    )
+
+    bad_mask = bad_mask[:x_size, :y_size, :z_size] > 0
 
     return bad_mask, num_regions_total
-
 
 def get_quantile_threshold(arr, q=0.95):
     """
@@ -1157,6 +1124,112 @@ def get_quantile_threshold(arr, q=0.95):
     part = cp.partition(flat, k)
     return part[k]
 
+def build_bad_cp_mask_from_cp_error(
+    err_cp,
+    mad_threshold=3.0,
+    min_component_size=2,
+    exclude_border_if_large=True,
+    large_cp_threshold=144,
+    eps=1e-12,
+):
+    """
+    Detect abnormal control points from err_cp.
+
+    Parameters
+    ----------
+    err_cp : cp.ndarray, shape (nx_cp, ny_cp, z)
+        Local residual error sampled on control points.
+
+    Returns
+    -------
+    bad_cp_mask : cp.ndarray, bool, shape (nx_cp, ny_cp, z)
+        True means this control point is considered wrong.
+
+    num_regions_total : int
+        Number of connected abnormal components after size filtering.
+
+    Notes
+    -----
+    - Connectivity is only in xy plane, not across z.
+    - This keeps different moving slices independent.
+    """
+    if not isinstance(err_cp, cp.ndarray):
+        err_cp = cp.asarray(err_cp)
+
+    err_cp = err_cp.astype(cp.float32, copy=False)
+    nx, ny, z_size = err_cp.shape
+
+    if err_cp.size == 0:
+        return cp.zeros_like(err_cp, dtype=cp.bool_), 0
+
+    sig_mask = cp.zeros((nx, ny, z_size), dtype=cp.bool_)
+
+    use_inner = (
+        exclude_border_if_large
+        and nx * ny > large_cp_threshold
+        and nx > 2
+        and ny > 2
+    )
+
+    if use_inner:
+        err_use = err_cp[1:-1, 1:-1, :]
+        flat = err_use.reshape(-1, z_size)
+
+        med = cp.median(flat, axis=0)
+        mad = cp.median(cp.abs(flat - med[None, :]), axis=0)
+
+        robust_z = cp.abs(flat - med[None, :]) / (1.4826 * mad[None, :] + eps)
+        sig_flat = robust_z > mad_threshold
+
+        # Important: preserve old MAD=0 behavior.
+        # If MAD is zero, non-median values should still be considered abnormal.
+        zero_mad = mad < eps
+        if bool(cp.any(zero_mad).item()):
+            sig_flat[:, zero_mad] = flat[:, zero_mad] != med[None, zero_mad]
+
+        sig_mask[1:-1, 1:-1, :] = sig_flat.reshape(nx - 2, ny - 2, z_size)
+
+    else:
+        flat = err_cp.reshape(-1, z_size)
+
+        med = cp.median(flat, axis=0)
+        mad = cp.median(cp.abs(flat - med[None, :]), axis=0)
+
+        robust_z = cp.abs(flat - med[None, :]) / (1.4826 * mad[None, :] + eps)
+        sig_flat = robust_z > mad_threshold
+
+        zero_mad = mad < eps
+        if bool(cp.any(zero_mad).item()):
+            sig_flat[:, zero_mad] = flat[:, zero_mad] != med[None, zero_mad]
+
+        sig_mask = sig_flat.reshape(nx, ny, z_size)
+
+    if not bool(cp.any(sig_mask).item()):
+        return cp.zeros_like(sig_mask, dtype=cp.bool_), 0
+
+    # 4-neighbor connectivity in xy only, no connection across z.
+    structure = cp.zeros((3, 3, 3), dtype=cp.bool_)
+    structure[:, :, 1] = cp.asarray(
+        [[0, 1, 0],
+         [1, 1, 1],
+         [0, 1, 0]],
+        dtype=cp.bool_,
+    )
+
+    labels, nlab = cupy_ndimage.label(sig_mask, structure=structure)
+    nlab = int(nlab)
+
+    if nlab == 0:
+        return cp.zeros_like(sig_mask, dtype=cp.bool_), 0
+
+    sizes = cp.bincount(labels.ravel(), minlength=nlab + 1)
+    keep_label = sizes >= int(min_component_size)
+    keep_label[0] = False
+
+    bad_cp_mask = keep_label[labels]
+    num_regions_total = int(cp.sum(keep_label).item())
+
+    return bad_cp_mask.astype(cp.bool_), num_regions_total
 
 # 2. Cross-resolution registration helpers
 def compose_phase_from_motion(phase_current, motion_current, zRatio, zRatio_hr):
@@ -1166,10 +1239,10 @@ def compose_phase_from_motion(phase_current, motion_current, zRatio, zRatio_hr):
     phase_new is defined in reference-grid coordinates.
     """
     phase_update = motion_current.copy()
-    phase_update[..., 2] = phase_update[..., 2] / zRatio_hr 
+    ####Update 2026/4/22 needn't to adjust the 
+    # phase_update[..., 2] = phase_update[..., 2] / zRatio_hr 
     phase_new = phase_current + phase_update
     return phase_new
-
 
 def resample_exclude_mask(mask, output_shape, threshold=0.5):
     """
@@ -1232,7 +1305,6 @@ def initialize_phase_for_layer(option, SZ,layer, x, y, z, zRatio, zRatio_hr):
 
     return phase_current
 
-
 def make_control_point_grid(x, y, z, r):
     """
     Build control-point grid for LK update.
@@ -1242,7 +1314,6 @@ def make_control_point_grid(x, y, z, r):
     zG = cp.arange(0, z)
     xG_grid, yG_grid, zG_grid = cp.meshgrid(xG, yG, zG, indexing="ij")
     return xG, yG, zG, xG_grid, yG_grid, zG_grid
-
 
 def compute_valid_mask_on_moving_grid(phase_new, H_mask_ref_layer, mask_mov_layer):
     """
@@ -1266,7 +1337,6 @@ def compute_valid_mask_on_moving_grid(phase_new, H_mask_ref_layer, mask_mov_laye
     mov_excluded = mask_mov_layer > 0
     valid_mask = (~mov_excluded) & (~ref_excluded)
     return valid_mask
-
 
 # 3. Core optimizer for one layer
 def optimize_layer_cross_resolution(
@@ -1344,7 +1414,17 @@ def optimize_layer_cross_resolution(
 
         error_last = residual ** 2
 
-        neiDiff = getNeiDiff(motion_current[xG_grid, yG_grid, zG_grid, :], 1)
+        # change the motion current to phase new 20260607 15:54
+        #neiDiff = getNeiDiff(motion_current[xG_grid, yG_grid, zG_grid, :], 1)
+        phase_cp = phase_new[xG_grid,yG_grid,zG_grid,:]
+        Xcp = xG_grid.astype(cp.float32)
+        Ycp = yG_grid.astype(cp.float32)
+        Zcp = zG_grid.astype(cp.float32)
+
+        phase_identity_cp = cp.stack([Xcp, Ycp, Zcp], axis=-1)
+        phase_residual_cp = phase_cp - phase_identity_cp
+        neiDiff = getNeiDiff(phase_residual_cp, 1)
+
         neiSum = smoothPenaltySum * neiDiff
 
         diffError, penaltyError = calError(residual, neiDiff, smoothPenaltySum)
@@ -1403,7 +1483,8 @@ def optimize_layer_cross_resolution(
         motion_update = getFlow3_withPenalty6(
             Ixx, Ixy, Ixz, Iyy, Iyz, Izz,
             Ixt, Iyt, Izt,
-            smoothPenaltySum, neiSum
+            smoothPenaltySum, neiSum,
+            verbose
         )
 
         # step clipping
@@ -1411,8 +1492,11 @@ def optimize_layer_cross_resolution(
         motion_norm = cp.maximum(motion_norm / movRange, 1.0)
         motion_update = motion_update / motion_norm[..., cp.newaxis]
 
-        motion_current_CP = motion_current[xG_grid, yG_grid, zG_grid, :] + motion_update
+        ## update 2026/4/22 we need to use the motion in coordinates space instead of phisical space
+        motion_update[..., 2] = motion_update[..., 2] / zRatio_hr
+    
 
+        motion_current_CP = motion_current[xG_grid, yG_grid, zG_grid, :] + motion_update
         grid_dense = cp.meshgrid(
             *[cp.arange(n, dtype=cp.float32) for n in data_mov_layer.shape],
             indexing="ij",
@@ -1465,7 +1549,6 @@ def optimize_layer_cross_resolution(
         "valid_mask": valid_mask,
     }
 
-
 # =========================================================
 # 4. Wrong-region correction for one layer
 # =========================================================
@@ -1502,6 +1585,9 @@ def correct_wrong_regions_one_layer(
     sigma_grad=1.0,
     intensity_k=2.0,
     quantile_threshold_q=0.8,
+    motion_inpaint_enable=True,
+    motion_inpaint_iters=30,
+    motion_inpaint_neighbor_mode="4",
 ):
     """
     Run normal optimization, detect bad regions, mask them out, rerun, and accept
@@ -1548,7 +1634,7 @@ def correct_wrong_regions_one_layer(
         kernelsize=2 * r + 1,
         metric=error_metric
     )
-
+   
     bad_mask, num_regions = build_bad_region_mask_from_cp_error(
         err_cp, r, xG, yG,
         x_size=data_mov_layer.shape[0],
@@ -1584,14 +1670,14 @@ def correct_wrong_regions_one_layer(
     # Only exclude regions that were originally valid in moving mask
     bad_mask = bad_mask & valid_mask0
     # visualization.visualize_2d_image(bad_mask.get(),autocontrast=False,title=f"[layer={layer}] bad region mask on moving grid")
-    trap_mask_ref = build_reference_trap_mask_from_bad_moving(
-            bad_mask=bad_mask,
-            phase_new=res0["phase_new"],
-            data_ref_layer=data_ref_layer,
-            z_ratio_ref=zRatio_hr,
-            expand_radius_xy=expand_radius_xy/(2.0**layer),
-            sigma_grad=sigma_grad,
-            intensity_k=intensity_k,
+    trap_mask_ref = build_reference_trap_mask_from_bad_moving_fast_roi(
+        bad_mask=bad_mask,
+        phase_new=res0["phase_new"],
+        data_ref_layer=data_ref_layer,
+        z_ratio_ref=zRatio_hr,
+        expand_radius_xy=expand_radius_xy/(2.0**layer),
+        sigma_grad=sigma_grad,
+        intensity_k=intensity_k,
     )
     # visualization.visualize_3d_image(trap_mask_ref.get(),title=f"[layer={layer}] trap mask in reference space")
     corrected_mask_ref = mask_ref_layer | trap_mask_ref
@@ -1685,7 +1771,6 @@ def correct_wrong_regions_one_layer(
         if verbose:
             print(f"[layer={layer}] keep original result")
         return res0
-
 
 # =========================================================
 # 5. Main public function
