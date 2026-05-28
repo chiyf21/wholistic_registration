@@ -957,7 +957,7 @@ def ReliableAnalysis(
         return cor
     
     # Import ComputMask function from utils.reliableAnalysis module
-    from utils.reliableAnalysis import ComputeMask_v2
+    from ..utils.reliableAnalysis import ComputeMask_v2
     
     # Call ComputMask to perform actual mask computation
     ComputeMask_v2(
@@ -1059,7 +1059,7 @@ def create_downsample_dataset_v3(
         print(f"[INFO] Total frames after T-downsample: {T_ds}")
 
     # ---------------- build reference index ----------------
-    from utils.reliableAnalysis import build_reference_index
+    from ..utils.reliableAnalysis import build_reference_index
     reg_mem_path = os.path.join(reg_path, "membrane")
     reg_cal_path = os.path.join(reg_path, "calcium")
     reg_ref_path = os.path.join(reg_path, "reference")
@@ -1234,7 +1234,7 @@ def create_downsample_dataset_v4(
 
     raw_dsXY = base_dsXY * ds_XY
 
-    from utils.reliableAnalysis import build_reference_index
+    from ..utils.reliableAnalysis import build_reference_index
 
     reg_mem_path = os.path.join(reg_path, "membrane")
     reg_cal_path = os.path.join(reg_path, "calcium")
