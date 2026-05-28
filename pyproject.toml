@@ -23,6 +23,14 @@ dependencies = [
 
 [project.optional-dependencies]
 gpu = ["cupy"]
+dev = [
+    "pytest>=7",
+    "pytest-cov",
+]
 
 [tool.setuptools]
-package-dir = {"" = "src"}             
+package-dir = {"" = "src"}
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers --import-mode=importlib"
