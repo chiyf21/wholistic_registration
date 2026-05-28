@@ -1160,74 +1160,7 @@ def create_downsample_dataset_v3(
 
     if verbose:
         print("[ALL DONE] Downsampled dataset (v3) created successfully.")
-def create_downsample_dataset_v4(
-    configPath='./configs/config.toml',
-    downsampleFilePath='./registrated_downsample',
-    ds_XY=1,
-    ds_T=1,
-    n_workers=4,
-    verbose=True
-):
-    """
-    Create a downsampled dataset (v3) from registered and raw ND2 data.
 
-    This version:
-    - Uses lazy dask arrays for TIFF series to reduce peak memory usage
-    - Computes per block to avoid loading all frames at once
-    - Outputs membrane, calcium, and mask volumes
-    - Maintains XY and time downsampling
-
-    Parameters
-    ----------
-    configPath : str
-        Path to TOML configuration file (must contain input_path, registrated_path, mask_path, and metadata).
-    downsampleFilePath : str
-        Output directory for downsampled dataset.
-    ds_XY : int
-        XY downsampling factor applied on top of base downsample in config.
-    ds_T : int
-        Temporal downsampling factor (frames skipped along time axis).
-    block_size : int
-        Number of frames to process per block to reduce memory consumption.
-    verbose : bool
-        Whether to print progress information.
-
-    Outputs
-    -------
-    downsampleFilePath/
-        membrane/    : raw_membrane + registered_membrane + reference
-        calcium/     : raw_calcium + registered_calcium
-        mask/        : reference + registered_membrane + mask
-
-    Usage
-    -----
-    create_downsample_dataset_v3(
-        configPath='./configs/config.toml',
-        downsampleFilePath='./registrated_downsample',
-        ds_XY=4, ds_T=2, block_size=50, verbose=True
-    )
-    """
-    import shutil
-    # ---------------- load config ----------------
-    config = toml.load(configPath)
-    raw_path  = config['file_path']['input_path']
-    reg_path  = config['file_path']['registrated_path']
-    mask_path = config['file_path']['mask_path']
-    dual_channel = config['channels']['dual_channel']
-    base_dsXY = config['downsample']['downsampleXY']
-    base_dsZ  = config['downsample']['downsampleZ']
-    frames = config['frames']['frames']
-    if config['MetaData']['Dim'] == 3:
-        base_dsZ = list(range(config['MetaData']['SIZE'][2]))
-    elif config['MetaData']['Dim'] == 2:
-        base_dsZ = [0]
-    else:
-        raise ValueError(f"[ERROR] Invalid Dim value in config. Must be 2 or 3. Dim={config['MetaData']['Dim']}")
-    dual_channel = config['channels']['dual_channel']
-
-    raw_dsXY = base_dsXY * ds_XY
-
-    from utils.reliableAnalysis import build_reference_index
 
 def create_downsample_dataset_v4(
     configPath='./configs/config.toml',
