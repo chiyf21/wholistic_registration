@@ -26,11 +26,78 @@ gpu = ["cupy"]
 dev = [
     "pytest>=7",
     "pytest-cov",
+    "ruff>=0.6",
+    "black>=24",
+    "mypy>=1.10",
+    "pre-commit>=3.7",
+    "nbstripout>=0.7",
 ]
 
 [tool.setuptools]
 package-dir = {"" = "src"}
 
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["wholistic_registration*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra --strict-markers --import-mode=importlib"
+
+# -----------------------------------------------------------------------------
+# Lint / format
+# -----------------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+extend-exclude = [
+    "src/wholistic_registration/archive",
+    "src/wholistic_registration/v2",
+    "src/wholistic_registration/code",
+    "src/wholistic_registration/demos",
+    "src/wholistic_registration/tests",
+    "src/wholistic_registration/macros",
+    "src/wholistic_registration/simulations",
+]
+
+[tool.ruff.lint]
+# A pragmatic starting set. Renames + a big formatting pass will follow
+# separately, so PEP 8 naming (N802, N803, N806) is tolerated for now.
+select = ["E", "F", "W", "I", "B", "UP", "RUF", "SIM", "PIE"]
+ignore = ["E501", "B007", "B008", "B028", "SIM108", "RUF005", "RUF013"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.black]
+line-length = 100
+target-version = ["py310"]
+extend-exclude = '''
+/(
+  | src/wholistic_registration/archive
+  | src/wholistic_registration/v2
+  | src/wholistic_registration/code
+  | src/wholistic_registration/demos
+  | src/wholistic_registration/tests
+)/
+'''
+
+# -----------------------------------------------------------------------------
+# Type checking (advisory only for now)
+# -----------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+warn_unused_ignores = true
+files = ["src/wholistic_registration"]
+exclude = [
+    "src/wholistic_registration/archive/",
+    "src/wholistic_registration/v2/",
+    "src/wholistic_registration/code/",
+    "src/wholistic_registration/demos/",
+    "src/wholistic_registration/tests/",
+]
+# Start loose; ratchet up over time.
+check_untyped_defs = false
+disallow_untyped_defs = false
