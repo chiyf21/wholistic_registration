@@ -10,4 +10,4 @@
 # 2026-05-28 — first wholesale ruff-format + ruff --fix pass on v1 sources.
 # Pure mechanical formatting (line length, quote style, import order,
 # whitespace normalization). No logic changes.
-PLACEHOLDER_F12C_FORMAT_PASS_SHA
+30a633f
