@@ -118,7 +118,7 @@ Previously, we randomly selected some control points and generated motion for th
 
 We did 10 repeats with various motion smoothness scale, deformation amplitude, and noise level. Here is the result:
 
-![result](images/Simulation.png)
+![result](../../../docs/assets/Simulation.png)
 
 # Pre-process and post-process
 
