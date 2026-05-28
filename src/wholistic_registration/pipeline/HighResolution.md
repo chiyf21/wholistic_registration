@@ -127,7 +127,7 @@ We did 10 repeats with various motion smoothness scale, deformation amplitude, a
 In slice-to-volume registration, we first need to find where each 2D moving slice sits along the $z$-axis of the 3D reference volume. A naive approach would pick the $z$-slice with the highest correlation globally — but this fails when the field of view contains multiple disconnected structures, each needing its own $z$-match. So instead, we estimate the initial $z$-position **per patch**.
 
 
-<img src="images/Different_map_in_one_image.png" alt="result" width="320" height="543">
+<img src="../../../docs/assets/Different_map_in_one_image.png" alt="result" width="320" height="543">
 
 
 Before the iterative optimization stage, we first estimate a coarse correspondence between the sparse moving stack and the dense reference volume. The updated preprocessing stage consists of two steps. First, we estimate the initial axial locations of the moving slices using a global fixed-spacing ZNCC search. Second, we use a learning-based coarse matching model to predict a sparse 3D coordinate field on the moving control grid. The predicted coarse mapping is then used as the initialization for the subsequent iterative registration.
