@@ -16,8 +16,7 @@ dependencies = [
     "nd2",
     "toml",
     "zarr",
-    "json",
-] 
+]
 
 [project.optional-dependencies]
 gpu = ["cupy"]
