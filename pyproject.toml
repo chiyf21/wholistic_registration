@@ -9,13 +9,16 @@ description = "Whole Brain Image Registration with GPU acceleration support"
 license = {text = "BSD-3-Clause"}
 requires-python = ">=3.8"
 dependencies = [
-    "numpy",
-    "scipy",
-    "matplotlib",
-    "tifffile",
-    "nd2",
-    "toml",
-    "zarr",
+    "numpy>=1.23",
+    "scipy>=1.10",
+    "matplotlib>=3.7",
+    "tifffile>=2023.7",
+    "nd2>=0.8",
+    "toml>=0.10",
+    "zarr>=2.16,<3",
+    "dask[array]>=2023.10",
+    "h5py>=3.9",
+    "scikit-image>=0.21",
 ]
 
 [project.optional-dependencies]
