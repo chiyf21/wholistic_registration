@@ -1,14 +1,12 @@
-from scipy.ndimage import zoom, filters
+import warnings
+
 import numpy as np
-from . import cp
-from . import interp
-from . import calculate
-from . import visualization
-from . import cupy_ndimage
+
+from . import calculate, cp, cupy_ndimage, interp
 from .imresize import imresize
 
-import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
+
 
 ####################################################################################################
 ## The same as before
@@ -27,9 +25,7 @@ def correctMotionGrid(data_raw, coords_new):
     x, y, z = data_raw.shape  # data_raw shape: (H, W, D)
 
     # Ensure the data is on GPU and convert to float32 for precision
-    data_raw = cp.asarray(
-        data_raw, dtype=cp.float32
-    )  # Convert to GPU array, shape: (H, W, D)
+    data_raw = cp.asarray(data_raw, dtype=cp.float32)  # Convert to GPU array, shape: (H, W, D)
     coords_new = cp.asarray(coords_new)  # Convert to GPU array, shape: (H, W, D, 3)
 
     # Transpose coordinates from (H, W, D, 3) to (3, H, W, D) for interpolation function
@@ -38,14 +34,13 @@ def correctMotionGrid(data_raw, coords_new):
 
     # Perform 3D interpolation using the deformed coordinates
     # This warps the original data according to the motion field
-    data1_tran = interp.interp3Grid(
-        data_raw, coords_new, method="linear"
-    )  # Shape: (H, W, D)
+    data1_tran = interp.interp3Grid(data_raw, coords_new, method="linear")  # Shape: (H, W, D)
 
     # Reshape the interpolated data back to original dimensions
     data_corrected = cp.reshape(data1_tran, (x, y, z))  # Shape: (H, W, D)
 
     return data_corrected
+
 
 def getNeiDiff(phi_current, r):
     """
@@ -60,15 +55,11 @@ def getNeiDiff(phi_current, r):
     """
     # Create the neighbor filter with size (2*r+1) x (2*r+1) x 1 x 1
     # This filter will be used to compute the difference between each point and its neighbors
-    NeiFltr = cp.ones(
-        (r * 2 + 1, r * 2 + 1, 1, 1), dtype=cp.float32
-    )  # Shape: (2*r+1, 2*r+1, 1, 1)
+    NeiFltr = cp.ones((r * 2 + 1, r * 2 + 1, 1, 1), dtype=cp.float32)  # Shape: (2*r+1, 2*r+1, 1, 1)
 
     # Normalize the filter by dividing by the number of neighbors (excluding center)
     # This ensures the filter sums to zero, making it a difference operator
-    NeiFltr = NeiFltr / (
-        (r * 2 + 1) ** 2 - 1
-    )  # Normalize by number of neighbors minus center
+    NeiFltr = NeiFltr / ((r * 2 + 1) ** 2 - 1)  # Normalize by number of neighbors minus center
 
     # Set the center element to -1 to create a difference filter
     # This makes the filter compute: (sum of neighbors) - center_value
@@ -81,6 +72,7 @@ def getNeiDiff(phi_current, r):
     )  # Shape: (H, W, D, 3)
 
     return neiDiff
+
 
 def calError(It, penaltyRaw, smoothPenaltySum):
     """
@@ -103,9 +95,7 @@ def calError(It, penaltyRaw, smoothPenaltySum):
 
     # Calculate the smoothness penalty error
     # Square the penalty values and sum across the 4th dimension (x,y,z motion components)
-    penaltyCorrected = (
-        cp.sum(penaltyRaw**2, axis=3) * smoothPenaltySum
-    )  # Shape: (H, W, D)
+    penaltyCorrected = cp.sum(penaltyRaw**2, axis=3) * smoothPenaltySum  # Shape: (H, W, D)
 
     # Normalize the penalty error by the total number of voxels
     penaltyError = cp.sum(penaltyCorrected) / (x * y * z)  # Scalar value
@@ -115,6 +105,7 @@ def calError(It, penaltyRaw, smoothPenaltySum):
         return diffError.get(), penaltyError.get()  # Convert GPU arrays to CPU
     else:
         return float(diffError), float(penaltyError)  # Already CPU arrays
+
 
 def getSpatialGradientInOrgGrid(data_raw, coords_new):
     """
@@ -190,8 +181,9 @@ def getSpatialGradientInOrgGrid(data_raw, coords_new):
 
     return Ix, Iy, Iz
 
+
 def getFlow3_withPenalty6(
-    Ixx, Ixy, Ixz, Iyy, Iyz, Izz, Ixt, Iyt, Izt, smoothPenaltySum, neiSum,verbose=False
+    Ixx, Ixy, Ixz, Iyy, Iyz, Izz, Ixt, Iyt, Izt, smoothPenaltySum, neiSum, verbose=False
 ):
     """
     Compute the flow with penalty and 3x3 matrix determinant using Lucas-Kanade method.
@@ -248,6 +240,7 @@ def getFlow3_withPenalty6(
         phi_gradient[cp.isnan(phi_gradient)] = 0
     return phi_gradient
 
+
 def compute_new_grid(grid, r, motion_shape):
     """
     Normalize the original grid to let the coordinates of control points be integer.
@@ -268,12 +261,8 @@ def compute_new_grid(grid, r, motion_shape):
     y_new = (y_coord - r) / (2 * r + 1)  # Shape: (H, W, D)
 
     # Clamp the normalized coordinates to valid range
-    x_new = cp.minimum(
-        cp.maximum(x_new, 0.0), motion_shape[0]
-    )  # Clamp to [0, motion_shape[0]]
-    y_new = cp.minimum(
-        cp.maximum(y_new, 0.0), motion_shape[1]
-    )  # Clamp to [0, motion_shape[1]]
+    x_new = cp.minimum(cp.maximum(x_new, 0.0), motion_shape[0])  # Clamp to [0, motion_shape[0]]
+    y_new = cp.minimum(cp.maximum(y_new, 0.0), motion_shape[1])  # Clamp to [0, motion_shape[1]]
 
     # Keep z coordinate unchanged (no normalization needed)
     z_new = z_coord  # Shape: (H, W, D)
@@ -281,8 +270,10 @@ def compute_new_grid(grid, r, motion_shape):
     # Stack the normalized coordinates
     return cp.stack([x_new, y_new, z_new], axis=0)  # Shape: (3, H, W, D)
 
+
 ## The same as before
 ####################################################################################################
+
 
 def _softmax_stable(x, axis=-1, eps=1e-8):
     """
@@ -291,6 +282,7 @@ def _softmax_stable(x, axis=-1, eps=1e-8):
     x_max = cp.max(x, axis=axis, keepdims=True)
     ex = cp.exp(x - x_max)
     return ex / (cp.sum(ex, axis=axis, keepdims=True) + eps)
+
 
 def _patch_grid_regularization(
     mu_patch,
@@ -340,8 +332,8 @@ def _patch_grid_regularization(
 
     return z
 
-def _global_zncc_scores(mov_feat, ref_feat, use_hann_weight=True, eps=1e-6):
 
+def _global_zncc_scores(mov_feat, ref_feat, use_hann_weight=True, eps=1e-6):
     H, W, K = mov_feat.shape
     _, _, Z = ref_feat.shape
 
@@ -378,6 +370,7 @@ def _global_zncc_scores(mov_feat, ref_feat, use_hann_weight=True, eps=1e-6):
     scores = cp.clip(scores, -1.0, 1.0)
     return scores
 
+
 def FindInitZ_stack_global_fixed_spacing(
     data_mov,
     data_ref,
@@ -394,10 +387,8 @@ def FindInitZ_stack_global_fixed_spacing(
     H, W, K = mov.shape
     Hr, Wr, Z = ref.shape
 
-    if (H, W) != (Hr, Wr):
-        raise ValueError(
-            f"XY size mismatch: data_mov has {(H, W)}, data_ref has {(Hr, Wr)}"
-        )
+    if (Hr, Wr) != (H, W):
+        raise ValueError(f"XY size mismatch: data_mov has {(H, W)}, data_ref has {(Hr, Wr)}")
 
     if K < 1:
         raise ValueError("Moving input must have at least one slice.")
@@ -485,12 +476,11 @@ def generate_continuous_H_gpu(stack, zRatio):
         coords_idx[..., 2] = coords[..., 2] / zRatio
         shape = coords_idx.shape
         coords_flat = coords_idx.reshape(-1, 3).T
-        values = cupy_ndimage.map_coordinates(
-            stack_gpu, coords_flat, order=3, mode="nearest"
-        )
+        values = cupy_ndimage.map_coordinates(stack_gpu, coords_flat, order=3, mode="nearest")
         return values.reshape(*shape[:-1])
 
     return H
+
 
 def apply_H_to_matrix_gpu(A, H):
     """
@@ -502,6 +492,7 @@ def apply_H_to_matrix_gpu(A, H):
     coords_flat = coords.reshape(-1, 3)
     R = H(coords_flat)
     return R.reshape(shape[:-1])
+
 
 def correctMotion(data_raw, motion_field):
     """
@@ -516,9 +507,7 @@ def correctMotion(data_raw, motion_field):
     """
     # Generate coordinate grid for the data
     grid = np.meshgrid(
-        *[
-            np.arange(n, dtype=np.float32) for n in data_raw.shape
-        ],  # Create coordinate arrays
+        *[np.arange(n, dtype=np.float32) for n in data_raw.shape],  # Create coordinate arrays
         indexing="ij",  # Use matrix indexing
         sparse=False,  # Return full grid
     )  # Returns tuple of 3 arrays, each shape: (H, W, D)
@@ -537,9 +526,9 @@ def correctMotion(data_raw, motion_field):
 
     return data_tran
 
+
 # 1. Wrong-region detection helpers
-def get_local_error_on_control_points(It, xG_grid, yG_grid, zG_grid,
-                                      kernelsize=11, metric="mse"):
+def get_local_error_on_control_points(It, xG_grid, yG_grid, zG_grid, kernelsize=11, metric="mse"):
     """
     Compute local residual error on control points from a dense residual map It.
 
@@ -562,16 +551,17 @@ def get_local_error_on_control_points(It, xG_grid, yG_grid, zG_grid,
         Dense pixel-wise error map before averaging.
     """
     if metric.lower() == "mse":
-        err_dense = It ** 2
+        err_dense = It**2
     elif metric.lower() == "mae":
         err_dense = cp.abs(It)
     else:
         raise ValueError("metric must be 'mse' or 'mae'")
 
-    kernel = cp.ones((kernelsize, kernelsize, 1), dtype=cp.float32) / (kernelsize ** 2)
+    kernel = cp.ones((kernelsize, kernelsize, 1), dtype=cp.float32) / (kernelsize**2)
     err_avg = calculate.imfilter(err_dense, kernel, "replicate", "same", "corr")
     err_cp = err_avg[xG_grid, yG_grid, zG_grid]
     return err_cp, err_dense
+
 
 def detect_significant_mad(values, threshold=3.0):
     """
@@ -597,12 +587,15 @@ def detect_significant_mad(values, threshold=3.0):
 
     return idx.astype(cp.int64)
 
+
 def _normalize_vec_field(vx, vy, vz, eps=1e-6):
     norm = cp.sqrt(vx**2 + vy**2 + vz**2) + eps
     return vx / norm, vy / norm, vz / norm
 
-def get_wrong_regions(err2d, r, xG, yG, x_threshold, y_threshold,
-                         mad_threshold=3.0, min_component_size=2):
+
+def get_wrong_regions(
+    err2d, r, xG, yG, x_threshold, y_threshold, mad_threshold=3.0, min_component_size=2
+):
     """
     Detect connected high-error regions on one z slice of control-point error map.
 
@@ -681,7 +674,7 @@ def get_wrong_regions(err2d, r, xG, yG, x_threshold, y_threshold,
         if len(comp) >= min_component_size:
             connected_components.append(cp.asarray(comp))
 
-    dx = int(cp.ceil(1.5*r))
+    dx = int(cp.ceil(1.5 * r))
 
     for comp in connected_components:
         min_row, max_row = int(comp[:, 0].min()), int(comp[:, 0].max())
@@ -701,6 +694,7 @@ def get_wrong_regions(err2d, r, xG, yG, x_threshold, y_threshold,
 
     return region_coor, connected_components
 
+
 def _make_ball(radius_xy, z_ratio):
     """
     Small anisotropic 3D structuring element.
@@ -717,8 +711,9 @@ def _make_ball(radius_xy, z_ratio):
     zs = cp.arange(-radius_z, radius_z + 1, dtype=cp.float32)
 
     XX, YY, ZZ = cp.meshgrid(xs, ys, zs, indexing="ij")
-    dist2 = XX**2 + YY**2 + (ZZ / z_ratio)**2
+    dist2 = XX**2 + YY**2 + (ZZ / z_ratio) ** 2
     return (dist2 <= radius_xy**2 + 1e-6).astype(cp.bool_)
+
 
 def _connected_grow(seed_mask, allowed_mask, structure, max_steps):
     """
@@ -732,6 +727,7 @@ def _connected_grow(seed_mask, allowed_mask, structure, max_steps):
             break
         region = grown
     return region
+
 
 def build_reference_trap_mask_from_bad_moving_fast_roi(
     bad_mask,
@@ -770,9 +766,12 @@ def build_reference_trap_mask_from_bad_moving_fast_roi(
     seed_z = cp.rint(seed_coords[:, 2]).astype(cp.int32)
 
     keep = (
-        (seed_x >= 0) & (seed_x < x_ref) &
-        (seed_y >= 0) & (seed_y < y_ref) &
-        (seed_z >= 0) & (seed_z < z_ref)
+        (seed_x >= 0)
+        & (seed_x < x_ref)
+        & (seed_y >= 0)
+        & (seed_y < y_ref)
+        & (seed_z >= 0)
+        & (seed_z < z_ref)
     )
 
     seed_x = seed_x[keep]
@@ -828,10 +827,7 @@ def build_reference_trap_mask_from_bad_moving_fast_roi(
     # 5) smooth reference inside ROI
     # ------------------------------------------------------------
     if sigma_grad > 0:
-        ref_sm = cupy_ndimage.gaussian_filter(
-            ref_crop,
-            sigma=(sigma_grad, sigma_grad, sigma_grad)
-        )
+        ref_sm = cupy_ndimage.gaussian_filter(ref_crop, sigma=(sigma_grad, sigma_grad, sigma_grad))
     else:
         ref_sm = ref_crop
 
@@ -886,6 +882,7 @@ def build_reference_trap_mask_from_bad_moving_fast_roi(
     trap_mask_ref[x0:x1, y0:y1, z0:z1] = region
 
     return trap_mask_ref
+
 
 def build_bad_region_mask_from_cp_error(
     err_cp,
@@ -951,12 +948,7 @@ def build_bad_region_mask_from_cp_error(
     # ------------------------------------------------------------
     sig_mask = cp.zeros((nx, ny, z_size), dtype=cp.bool_)
 
-    use_inner = (
-        exclude_border_if_large
-        and nx * ny > large_cp_threshold
-        and nx > 2
-        and ny > 2
-    )
+    use_inner = exclude_border_if_large and nx * ny > large_cp_threshold and nx > 2 and ny > 2
 
     if use_inner:
         err_use = err_cp[1:-1, 1:-1, :]
@@ -997,9 +989,7 @@ def build_bad_region_mask_from_cp_error(
     # ------------------------------------------------------------
     structure = cp.zeros((3, 3, 3), dtype=cp.bool_)
     structure[:, :, 1] = cp.asarray(
-        [[0, 1, 0],
-         [1, 1, 1],
-         [0, 1, 0]],
+        [[0, 1, 0], [1, 1, 1], [0, 1, 0]],
         dtype=cp.bool_,
     )
 
@@ -1113,6 +1103,7 @@ def build_bad_region_mask_from_cp_error(
 
     return bad_mask, num_regions_total
 
+
 def get_quantile_threshold(arr, q=0.95):
     """
     Robust quantile threshold on CuPy array.
@@ -1123,6 +1114,7 @@ def get_quantile_threshold(arr, q=0.95):
     k = int(cp.clip(cp.floor((flat.size - 1) * q), 0, flat.size - 1))
     part = cp.partition(flat, k)
     return part[k]
+
 
 def build_bad_cp_mask_from_cp_error(
     err_cp,
@@ -1164,12 +1156,7 @@ def build_bad_cp_mask_from_cp_error(
 
     sig_mask = cp.zeros((nx, ny, z_size), dtype=cp.bool_)
 
-    use_inner = (
-        exclude_border_if_large
-        and nx * ny > large_cp_threshold
-        and nx > 2
-        and ny > 2
-    )
+    use_inner = exclude_border_if_large and nx * ny > large_cp_threshold and nx > 2 and ny > 2
 
     if use_inner:
         err_use = err_cp[1:-1, 1:-1, :]
@@ -1210,9 +1197,7 @@ def build_bad_cp_mask_from_cp_error(
     # 4-neighbor connectivity in xy only, no connection across z.
     structure = cp.zeros((3, 3, 3), dtype=cp.bool_)
     structure[:, :, 1] = cp.asarray(
-        [[0, 1, 0],
-         [1, 1, 1],
-         [0, 1, 0]],
+        [[0, 1, 0], [1, 1, 1], [0, 1, 0]],
         dtype=cp.bool_,
     )
 
@@ -1231,6 +1216,7 @@ def build_bad_cp_mask_from_cp_error(
 
     return bad_cp_mask.astype(cp.bool_), num_regions_total
 
+
 # 2. Cross-resolution registration helpers
 def compose_phase_from_motion(phase_current, motion_current, zRatio, zRatio_hr):
     """
@@ -1239,10 +1225,11 @@ def compose_phase_from_motion(phase_current, motion_current, zRatio, zRatio_hr):
     phase_new is defined in reference-grid coordinates.
     """
     phase_update = motion_current.copy()
-    ####Update 2026/4/22 needn't to adjust the 
-    # phase_update[..., 2] = phase_update[..., 2] / zRatio_hr 
+    ####Update 2026/4/22 needn't to adjust the
+    # phase_update[..., 2] = phase_update[..., 2] / zRatio_hr
     phase_new = phase_current + phase_update
     return phase_new
+
 
 def resample_exclude_mask(mask, output_shape, threshold=0.5):
     """
@@ -1267,7 +1254,10 @@ def resample_exclude_mask(mask, output_shape, threshold=0.5):
     mask_rs = imresize(cp.asarray(mask, dtype=cp.float32), output_shape=output_shape)
     return mask_rs > threshold
 
-def initialize_motion_for_layer(option, layer, layer_num, SZ, x, y, z, pyramid = "anisotropic",prev_motion=None):
+
+def initialize_motion_for_layer(
+    option, layer, layer_num, SZ, x, y, z, pyramid="anisotropic", prev_motion=None
+):
     """
     Initialize motion field for current layer.
     """
@@ -1275,21 +1265,34 @@ def initialize_motion_for_layer(option, layer, layer_num, SZ, x, y, z, pyramid =
         if "motion" in option and option["motion"] is not None:
             motion_init = cp.asarray(option["motion"], dtype=cp.float32)
             motion_current = cp.zeros((x, y, z, 3), dtype=cp.float32)
-            motion_current[..., 0] = imresize(motion_init[..., 0], output_shape=(x, y, z)) / (SZ[0] / x)
-            motion_current[..., 1] = imresize(motion_init[..., 1], output_shape=(x, y, z)) / (SZ[1] / y)
-            motion_current[..., 2] = imresize(motion_init[..., 2], output_shape=(x, y, z)) / (SZ[2] / z)
+            motion_current[..., 0] = imresize(motion_init[..., 0], output_shape=(x, y, z)) / (
+                SZ[0] / x
+            )
+            motion_current[..., 1] = imresize(motion_init[..., 1], output_shape=(x, y, z)) / (
+                SZ[1] / y
+            )
+            motion_current[..., 2] = imresize(motion_init[..., 2], output_shape=(x, y, z)) / (
+                SZ[2] / z
+            )
         else:
             motion_current = cp.zeros((x, y, z, 3), dtype=cp.float32)
     else:
         motion_current = cp.zeros((x, y, z, 3), dtype=cp.float32)
-        motion_current[..., 0] = imresize(prev_motion[..., 0], output_shape=(x, y, z), method="bilinear") * 2
-        motion_current[..., 1] = imresize(prev_motion[..., 1], output_shape=(x, y, z), method="bilinear") * 2
-        motion_current[..., 2] = imresize(prev_motion[..., 2], output_shape=(x, y, z), method="bilinear")
+        motion_current[..., 0] = (
+            imresize(prev_motion[..., 0], output_shape=(x, y, z), method="bilinear") * 2
+        )
+        motion_current[..., 1] = (
+            imresize(prev_motion[..., 1], output_shape=(x, y, z), method="bilinear") * 2
+        )
+        motion_current[..., 2] = imresize(
+            prev_motion[..., 2], output_shape=(x, y, z), method="bilinear"
+        )
         motion_current = cp.asarray(motion_current, dtype=cp.float32)
 
     return motion_current
 
-def initialize_phase_for_layer(option, SZ,layer, x, y, z, zRatio, zRatio_hr):
+
+def initialize_phase_for_layer(option, SZ, layer, x, y, z, zRatio, zRatio_hr):
     """
     Initialize phase field for current layer.
     """
@@ -1305,6 +1308,7 @@ def initialize_phase_for_layer(option, SZ,layer, x, y, z, zRatio, zRatio_hr):
 
     return phase_current
 
+
 def make_control_point_grid(x, y, z, r):
     """
     Build control-point grid for LK update.
@@ -1314,6 +1318,7 @@ def make_control_point_grid(x, y, z, r):
     zG = cp.arange(0, z)
     xG_grid, yG_grid, zG_grid = cp.meshgrid(xG, yG, zG, indexing="ij")
     return xG, yG, zG, xG_grid, yG_grid, zG_grid
+
 
 def compute_valid_mask_on_moving_grid(phase_new, H_mask_ref_layer, mask_mov_layer):
     """
@@ -1337,6 +1342,7 @@ def compute_valid_mask_on_moving_grid(phase_new, H_mask_ref_layer, mask_mov_laye
     mov_excluded = mask_mov_layer > 0
     valid_mask = (~mov_excluded) & (~ref_excluded)
     return valid_mask
+
 
 # 3. Core optimizer for one layer
 def optimize_layer_cross_resolution(
@@ -1404,19 +1410,18 @@ def optimize_layer_cross_resolution(
 
         residual = data_mov_layer - data_ref_sampled
         residual = calculate.imfilter(
-            residual, cp.ones((3, 3, 1), dtype=cp.float32) / 9,
-            "replicate", "same", "corr"
+            residual, cp.ones((3, 3, 1), dtype=cp.float32) / 9, "replicate", "same", "corr"
         )
         residual[~valid_mask] = 0
 
         if it == 0:
-            error_init = residual ** 2
+            error_init = residual**2
 
-        error_last = residual ** 2
+        error_last = residual**2
 
         # change the motion current to phase new 20260607 15:54
-        #neiDiff = getNeiDiff(motion_current[xG_grid, yG_grid, zG_grid, :], 1)
-        phase_cp = phase_new[xG_grid,yG_grid,zG_grid,:]
+        # neiDiff = getNeiDiff(motion_current[xG_grid, yG_grid, zG_grid, :], 1)
+        phase_cp = phase_new[xG_grid, yG_grid, zG_grid, :]
         Xcp = xG_grid.astype(cp.float32)
         Ycp = yG_grid.astype(cp.float32)
         Zcp = zG_grid.astype(cp.float32)
@@ -1460,12 +1465,12 @@ def optimize_layer_cross_resolution(
         Iz[~valid_mask] = 0
         Iz /= zRatio_hr
 
-        Ixx = calculate.imfilter(Ix ** 2, AverageFilter, "replicate", "same", "corr")
+        Ixx = calculate.imfilter(Ix**2, AverageFilter, "replicate", "same", "corr")
         Ixy = calculate.imfilter(Ix * Iy, AverageFilter, "replicate", "same", "corr")
         Ixz = calculate.imfilter(Ix * Iz, AverageFilter, "replicate", "same", "corr")
-        Iyy = calculate.imfilter(Iy ** 2, AverageFilter, "replicate", "same", "corr")
+        Iyy = calculate.imfilter(Iy**2, AverageFilter, "replicate", "same", "corr")
         Iyz = calculate.imfilter(Iy * Iz, AverageFilter, "replicate", "same", "corr")
-        Izz = calculate.imfilter(Iz ** 2, AverageFilter, "replicate", "same", "corr")
+        Izz = calculate.imfilter(Iz**2, AverageFilter, "replicate", "same", "corr")
         Ixt = calculate.imfilter(Ix * residual, AverageFilter, "replicate", "same", "corr")
         Iyt = calculate.imfilter(Iy * residual, AverageFilter, "replicate", "same", "corr")
         Izt = calculate.imfilter(Iz * residual, AverageFilter, "replicate", "same", "corr")
@@ -1481,20 +1486,16 @@ def optimize_layer_cross_resolution(
         Izt = Izt[xG_grid, yG_grid, zG_grid]
 
         motion_update = getFlow3_withPenalty6(
-            Ixx, Ixy, Ixz, Iyy, Iyz, Izz,
-            Ixt, Iyt, Izt,
-            smoothPenaltySum, neiSum,
-            verbose
+            Ixx, Ixy, Ixz, Iyy, Iyz, Izz, Ixt, Iyt, Izt, smoothPenaltySum, neiSum, verbose
         )
 
         # step clipping
-        motion_norm = cp.sqrt(cp.sum(motion_update ** 2, axis=3))
+        motion_norm = cp.sqrt(cp.sum(motion_update**2, axis=3))
         motion_norm = cp.maximum(motion_norm / movRange, 1.0)
         motion_update = motion_update / motion_norm[..., cp.newaxis]
 
         ## update 2026/4/22 we need to use the motion in coordinates space instead of phisical space
         motion_update[..., 2] = motion_update[..., 2] / zRatio_hr
-    
 
         motion_current_CP = motion_current[xG_grid, yG_grid, zG_grid, :] + motion_update
         grid_dense = cp.meshgrid(
@@ -1514,7 +1515,7 @@ def optimize_layer_cross_resolution(
                 print(f"[layer={layer}] stop: motion update below tol")
             break
         # visualization.visualize_2d_image(data_ref_sampled.get(),title = "[iter {iter}]: mapping image")
-            
+
     # final recompute
     phase_new = compose_phase_from_motion(phase_current, motion_current, zRatio, zRatio_hr)
     data_ref_sampled = apply_H_to_matrix_gpu(phase_new, H_ref_layer)
@@ -1526,11 +1527,10 @@ def optimize_layer_cross_resolution(
 
     residual = data_mov_layer - data_ref_sampled
     residual = calculate.imfilter(
-        residual, cp.ones((3, 3, 1), dtype=cp.float32) / 9,
-        "replicate", "same", "corr"
+        residual, cp.ones((3, 3, 1), dtype=cp.float32) / 9, "replicate", "same", "corr"
     )
     residual[~valid_mask] = 0
-    error_last = residual ** 2
+    error_last = residual**2
 
     neiDiff = getNeiDiff(motion_current[xG_grid, yG_grid, zG_grid, :], 1)
     diffError, penaltyError = calError(residual, neiDiff, smoothPenaltySum)
@@ -1549,9 +1549,11 @@ def optimize_layer_cross_resolution(
         "valid_mask": valid_mask,
     }
 
+
 # =========================================================
 # 4. Wrong-region correction for one layer
 # =========================================================
+
 
 def correct_wrong_regions_one_layer(
     data_mov_layer,
@@ -1580,7 +1582,7 @@ def correct_wrong_regions_one_layer(
     bad_region_exclude_mode="direct",
     verbose=False,
     layer=None,
-    #Params for constructing trap mask in reference space
+    # Params for constructing trap mask in reference space
     expand_radius_xy=2.0,
     sigma_grad=1.0,
     intensity_k=2.0,
@@ -1630,17 +1632,18 @@ def correct_wrong_regions_one_layer(
     # Detect bad regions on moving grid from residual
     # -----------------------------------------------------
     err_cp, _ = get_local_error_on_control_points(
-        residual0, xG_grid, yG_grid, zG_grid,
-        kernelsize=2 * r + 1,
-        metric=error_metric
+        residual0, xG_grid, yG_grid, zG_grid, kernelsize=2 * r + 1, metric=error_metric
     )
-   
+
     bad_mask, num_regions = build_bad_region_mask_from_cp_error(
-        err_cp, r, xG, yG,
+        err_cp,
+        r,
+        xG,
+        yG,
         x_size=data_mov_layer.shape[0],
         y_size=data_mov_layer.shape[1],
         mad_threshold=mad_threshold,
-        min_component_size=min_component_size
+        min_component_size=min_component_size,
     )
     # visualization.visualize_2d_image(bad_mask.get(),autocontrast=False)
     if verbose:
@@ -1658,14 +1661,17 @@ def correct_wrong_regions_one_layer(
 
         dense_err = error_init0 - error_last0
         dense_err = calculate.imfilter(
-            dense_err, cp.ones((3, 3, 1), dtype=cp.float32) / 9,
-            "replicate", "same", "corr"
+            dense_err, cp.ones((3, 3, 1), dtype=cp.float32) / 9, "replicate", "same", "corr"
         )
         dense_err[~bad_mask] = 0
         # visualization.visualize_2d_image(dense_err.get(),autocontrast=True,title=f"[layer={layer}] dense error before thresholding")
-        th = get_quantile_threshold(dense_err[bad_mask], q=quantile_threshold_q) if cp.any(bad_mask) else 0
+        th = (
+            get_quantile_threshold(dense_err[bad_mask], q=quantile_threshold_q)
+            if cp.any(bad_mask)
+            else 0
+        )
         bad_mask = bad_mask & (dense_err >= th)
-        
+
     # visualization.visualize_2d_image(bad_mask.get(),autocontrast=False)
     # Only exclude regions that were originally valid in moving mask
     bad_mask = bad_mask & valid_mask0
@@ -1675,7 +1681,7 @@ def correct_wrong_regions_one_layer(
         phase_new=res0["phase_new"],
         data_ref_layer=data_ref_layer,
         z_ratio_ref=zRatio_hr,
-        expand_radius_xy=expand_radius_xy/(2.0**layer),
+        expand_radius_xy=expand_radius_xy / (2.0**layer),
         sigma_grad=sigma_grad,
         intensity_k=intensity_k,
     )
@@ -1683,15 +1689,12 @@ def correct_wrong_regions_one_layer(
     corrected_mask_ref = mask_ref_layer | trap_mask_ref
 
     H_mask_ref_layer_corrected = generate_continuous_H_gpu(
-        corrected_mask_ref.astype(cp.float32),
-        zRatio=1
+        corrected_mask_ref.astype(cp.float32), zRatio=1
     )
 
     n_valid_old = int(cp.sum(valid_mask0).item())
     valid_mask1 = compute_valid_mask_on_moving_grid(
-        res0["phase_new"],
-        H_mask_ref_layer_corrected,
-        mask_mov_layer
+        res0["phase_new"], H_mask_ref_layer_corrected, mask_mov_layer
     )
     n_valid_new = int(cp.sum(valid_mask1).item())
     valid_ratio = n_valid_new / max(n_valid_old, 1)
@@ -1727,7 +1730,7 @@ def correct_wrong_regions_one_layer(
         verbose=verbose,
         layer=layer,
     )
-    
+
     # -----------------------------------------------------
     # Pass 3: refinement with original moving mask
     # -----------------------------------------------------
@@ -1772,9 +1775,11 @@ def correct_wrong_regions_one_layer(
             print(f"[layer={layer}] keep original result")
         return res0
 
+
 # =========================================================
 # 5. Main public function
 # =========================================================
+
 
 def getMotion_v2(data_mov, data_ref, option, verbose=False):
     """
@@ -1829,7 +1834,7 @@ def getMotion_v2(data_mov, data_ref, option, verbose=False):
     sigma_grad = float(option.get("sigma_grad", 1.0))
     intensity_k = float(option.get("intensity_k", 2.0))
     quantile_threshold_q = float(option.get("quantile_threshold_q", 0.8))
-    
+
     data_mov = cp.asarray(data_mov, dtype=cp.float32)
     data_ref = cp.asarray(data_ref, dtype=cp.float32)
 
@@ -1846,13 +1851,13 @@ def getMotion_v2(data_mov, data_ref, option, verbose=False):
     for layer in range(layer_num, -1, -1):
         if verbose:
             print(f"\n========== start layer {layer}/{layer_num} ==========")
-        x = int(SZ[0] / (2 ** layer))
-        y = int(SZ[1] / (2 ** layer))
+        x = int(SZ[0] / (2**layer))
+        y = int(SZ[1] / (2**layer))
         z = SZ[2]
 
         # reference resolution
-        x_hr = int(SZ_HR[0] / (2 ** layer))
-        y_hr = int(SZ_HR[1] / (2 ** layer))
+        x_hr = int(SZ_HR[0] / (2**layer))
+        y_hr = int(SZ_HR[1] / (2**layer))
         z_hr = SZ_HR[2]
 
         data_mov_layer = imresize(data_mov, output_shape=(x, y, z))
@@ -1861,8 +1866,8 @@ def getMotion_v2(data_mov, data_ref, option, verbose=False):
         mask_mov_layer = resample_exclude_mask(option["mask_mov"], output_shape=(x, y, z))
         mask_ref_layer = resample_exclude_mask(option["mask_ref"], output_shape=(x_hr, y_hr, z_hr))
 
-        zRatio = zRatio_raw / (2 ** layer)
-        zRatio_hr = zRatio_HR / (2 ** layer)
+        zRatio = zRatio_raw / (2**layer)
+        zRatio_hr = zRatio_HR / (2**layer)
         H_ref_layer = generate_continuous_H_gpu(data_ref_layer, zRatio=1)
         H_mask_ref_layer = generate_continuous_H_gpu(mask_ref_layer.astype(cp.float32), zRatio=1)
 
@@ -1872,16 +1877,13 @@ def getMotion_v2(data_mov, data_ref, option, verbose=False):
             layer=layer,
             layer_num=layer_num,
             SZ=SZ,
-            x=x, y=y, z=z,
-            prev_motion=motion_current
+            x=x,
+            y=y,
+            z=z,
+            prev_motion=motion_current,
         )
         phase_current = initialize_phase_for_layer(
-            option=option,
-            SZ=SZ,
-            layer=layer,
-            x=x, y=y, z=z,
-            zRatio=zRatio,
-            zRatio_hr=zRatio_hr
+            option=option, SZ=SZ, layer=layer, x=x, y=y, z=z, zRatio=zRatio, zRatio_hr=zRatio_hr
         )
 
         # keep a copy for possible correction restart
@@ -1923,7 +1925,7 @@ def getMotion_v2(data_mov, data_ref, option, verbose=False):
                 expand_radius_xy=expand_radius_xy,
                 sigma_grad=sigma_grad,
                 intensity_k=intensity_k,
-                quantile_threshold_q=quantile_threshold_q
+                quantile_threshold_q=quantile_threshold_q,
             )
         else:
             result = optimize_layer_cross_resolution(

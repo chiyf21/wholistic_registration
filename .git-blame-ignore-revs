@@ -1,0 +1,13 @@
+# Revisions listed here are ignored by `git blame` so the blame output
+# attributes lines to their last *meaningful* change rather than to
+# whole-tree formatting or rename passes.
+#
+# Configure git to honor this file once per clone:
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+#
+# GitHub honors this file automatically when present at the repo root.
+
+# 2026-05-28 — first wholesale ruff-format + ruff --fix pass on v1 sources.
+# Pure mechanical formatting (line length, quote style, import order,
+# whitespace normalization). No logic changes.
+PLACEHOLDER_F12C_FORMAT_PASS_SHA

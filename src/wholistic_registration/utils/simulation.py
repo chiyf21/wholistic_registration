@@ -1,48 +1,45 @@
-import numpy as np
-import scipy.io as sio
-from scipy.ndimage import gaussian_filter
-from . import calFlow3d_Wei_v1
-from . import IO
 import os
-from . import cp
-from . import cupy_ndimage 
+
+import numpy as np
 from skimage.metrics import structural_similarity as ssim
 
-def generateMotion(raw_data, art_R, amp_art,zRatio=1):
+from . import IO, calFlow3d_Wei_v1, cp, cupy_ndimage
+
+
+def generateMotion(raw_data, art_R, amp_art, zRatio=1):
     """
     generate simulation(amp and r)
-    
+
     Parameters:
         res_path_name: Path to result directory
         reader: Metadata reader (must implement read_meta method)
         art_R: Artifact-related parameter
         amp_art: Amplitude parameter
         *args: Optional arguments, used to provide zRatio
-        
+
     Returns:
         motion_X, motion_Y, motion_Z: Motion data arrays
         cp_art: Indices of randomly selected points
     """
 
-    
     # Calculate filter sigma values for 3D Gaussian filtering
     filter_sigma = np.array([art_R, art_R, art_R / zRatio])
-    
-    [X,Y,Z]=raw_data.shape
-    N=X*Y*Z  # Total number of points in the 3D volume
+
+    [X, Y, Z] = raw_data.shape
+    N = X * Y * Z  # Total number of points in the 3D volume
 
     # Calculate number of points to select
-    ratio_art = 1 / ((art_R * 2 + 1) **2)
+    ratio_art = 1 / ((art_R * 2 + 1) ** 2)
     L = round(N * ratio_art)  # Number of points to select
-    
+
     # Randomly select L points using permutation
     cp_art = np.random.permutation(N)[:L]
-    
+
     # Initialize motion arrays with single precision
     motion_X = np.zeros((X, Y, Z), dtype=np.float32)
     motion_Y = np.zeros((X, Y, Z), dtype=np.float32)
     motion_Z = np.zeros((X, Y, Z), dtype=np.float32)
-    
+
     # Add Gaussian noise to randomly selected points
     motion_X.flat[cp_art] = np.random.randn(L)
     motion_Y.flat[cp_art] = np.random.randn(L)
@@ -52,7 +49,7 @@ def generateMotion(raw_data, art_R, amp_art,zRatio=1):
     motion_X = cupy_ndimge.gaussian_filter(motion_X, sigma=filter_sigma)
     motion_Y = cupy_ndimge.gaussian_filter(motion_Y, sigma=filter_sigma)
     # motion_Z = cupy_ndimge.gaussian_filter(motion_Z, sigma=filter_sigma)  # Commented out as in original code
-    
+
     # Calculate scaling factors based on standard deviation
     # Note: Using motion_Y's standard deviation for both X and Y scaling
     # Preserving original behavior even if potentially a typo
@@ -67,6 +64,7 @@ def generateMotion(raw_data, art_R, amp_art,zRatio=1):
 
     return motion_X, motion_Y, motion_Z, cp_art
 
+
 def limit_gradient_3d(motion, max_grad):
     """
     限制 3D 位移场的梯度范数，防止 folding / 纹理折断
@@ -79,6 +77,7 @@ def limit_gradient_3d(motion, max_grad):
     scale = np.maximum(1.0, grad_norm / max_grad)
 
     return motion / scale
+
 
 def generateMotion_Biophysical(
     shape,
@@ -138,12 +137,10 @@ def generateMotion_Biophysical(
     # xy-dominant smooth deformation
     # -------------------------
     motion_X = cupy_ndimage.gaussian_filter(
-        cp.random.randn(X, Y, Z),
-        sigma=(art_R_xy, art_R_xy, art_R_z)
+        cp.random.randn(X, Y, Z), sigma=(art_R_xy, art_R_xy, art_R_z)
     )
     motion_Y = cupy_ndimage.gaussian_filter(
-        cp.random.randn(X, Y, Z),
-        sigma=(art_R_xy, art_R_xy, art_R_z)
+        cp.random.randn(X, Y, Z), sigma=(art_R_xy, art_R_xy, art_R_z)
     )
 
     scale_xy = cp.percentile(cp.sqrt(motion_X**2 + motion_Y**2), 95)
@@ -208,58 +205,61 @@ def generateMotion_Biophysical(
         motion_Z = motion_Z + a * Cxy
         # motion_Z = motion_Z / zRatio
 
-
     motion = cp.stack([motion_X, motion_Y, motion_Z], axis=3)
     return motion.get() if hasattr(motion, "get") else motion
 
-def generate_single_simulated_data(original_data_path, frame,crop_region, r_value, amp_value, noise_level,
-                                  ):
+
+def generate_single_simulated_data(
+    original_data_path,
+    frame,
+    crop_region,
+    r_value,
+    amp_value,
+    noise_level,
+):
     # crop region
     x_start, y_start, z_start, x_size, y_size, z_size = crop_region
     crop_range_x = slice(x_start, x_start + x_size)
     crop_range_y = slice(y_start, y_start + y_size)
     crop_range_z = slice(z_start, z_start + z_size)
-    
-    
-    #load the data
+
+    # load the data
     print("Loading raw data...")
     meta = IO.readMeta(original_data_path)
-    dat_org = IO.readFrame(original_data_path,frame,1)
-    
+    dat_org = IO.readFrame(original_data_path, frame, 1)
+
     # zRatio
-    channels=meta.channels[0]
-    axesCalibration=channels.volume.axesCalibration
-    zRatio=axesCalibration[2]/axesCalibration[0]
+    channels = meta.channels[0]
+    axesCalibration = channels.volume.axesCalibration
+    zRatio = axesCalibration[2] / axesCalibration[0]
 
     # generate motion(amp and r)
     print(f"generation motion (R={r_value}, Amp={amp_value})...")
-    motion_x, motion_y, motion_z, _ = generateMotion(
-        dat_org ,r_value, amp_value, zRatio
-    )
-    
+    motion_x, motion_y, motion_z, _ = generateMotion(dat_org, r_value, amp_value, zRatio)
+
     motion_current_real = np.stack([motion_x, motion_y, motion_z], axis=3)
 
     print("apply motion")
     dat_mov_raw = calFlow3d_Wei_v1.correctMotion(dat_org, -motion_current_real)  # 应用负向运动
     dat_ref_raw = calFlow3d_Wei_v1.correctMotion(dat_mov_raw, motion_current_real)  # 校正回参考位置
-    
+
     print(f"add noise (noise level: {noise_level})")
     dat_mov = dat_mov_raw + np.random.randn(*dat_org.shape) * noise_level
     dat_ref = dat_ref_raw + np.random.randn(*dat_org.shape) * noise_level
-    
 
     print("crop the data to the given region")
     dat_mov_cropped = dat_mov[crop_range_x, crop_range_y, crop_range_z]
     dat_ref_cropped = dat_ref[crop_range_x, crop_range_y, crop_range_z]
     motion_cropped = motion_current_real[crop_range_x, crop_range_y, crop_range_z, :]
-    
+
     crop_info = {
-        'crop_range_x': np.arange(x_start, x_start + x_size),
-        'crop_range_y': np.arange(y_start, y_start + y_size),
-        'crop_range_z': np.arange(z_start, z_start + z_size)
+        "crop_range_x": np.arange(x_start, x_start + x_size),
+        "crop_range_y": np.arange(y_start, y_start + y_size),
+        "crop_range_z": np.arange(z_start, z_start + z_size),
     }
-    
+
     return dat_mov_cropped, dat_ref_cropped, motion_cropped, crop_info
+
 
 def crop_valid(arr, crop=50):
     if crop <= 0:
@@ -271,11 +271,14 @@ def crop_valid(arr, crop=50):
     else:
         raise ValueError(f"Unsupported ndim={arr.ndim}")
 
+
 def compute_intensity_mse(pred, gt):
     return float(np.mean((pred - gt) ** 2))
 
+
 def compute_intensity_rmse(pred, gt):
     return float(np.sqrt(np.mean((pred - gt) ** 2)))
+
 
 def compute_volume_ssim(pred, gt, data_range=None):
     """
@@ -292,14 +295,9 @@ def compute_volume_ssim(pred, gt, data_range=None):
 
     vals = []
     for z in range(pred.shape[2]):
-        vals.append(
-            ssim(
-                gt[:, :, z],
-                pred[:, :, z],
-                data_range=data_range
-            )
-        )
+        vals.append(ssim(gt[:, :, z], pred[:, :, z], data_range=data_range))
     return float(np.mean(vals))
+
 
 def compute_motion_metrics(pred, gt, z_ratio=1.0, use_z=True):
     """
@@ -328,7 +326,7 @@ def compute_motion_metrics(pred, gt, z_ratio=1.0, use_z=True):
     if use_z and pred.shape[-1] >= 3:
         dz = diff[..., 2]
         epe_3d = np.sqrt(dy**2 + dx**2 + dz**2)
-        epe_phys = np.sqrt(dy**2 + dx**2 + (z_ratio * dz)**2)
+        epe_phys = np.sqrt(dy**2 + dx**2 + (z_ratio * dz) ** 2)
 
         metrics["motion_epe_3d_mean"] = float(np.mean(epe_3d))
         metrics["motion_epe_3d_median"] = float(np.median(epe_3d))
@@ -357,7 +355,7 @@ def plot_publication_metric(
     figsize=(4.8, 3.6),
     linewidth=2.0,
     markersize=5.5,
-    dpi=300
+    dpi=300,
 ):
     """
     Plot publication-style curves for any two metrics.
@@ -383,21 +381,23 @@ def plot_publication_metric(
 
     os.makedirs(save_dir, exist_ok=True)
 
-    plt.rcParams.update({
-        "font.size": 11,
-        "axes.labelsize": 12,
-        "axes.titlesize": 12,
-        "xtick.labelsize": 10,
-        "ytick.labelsize": 10,
-        "legend.fontsize": 10,
-        "axes.linewidth": 1.0,
-        "xtick.major.width": 1.0,
-        "ytick.major.width": 1.0,
-        "xtick.major.size": 4,
-        "ytick.major.size": 4,
-        "pdf.fonttype": 42,
-        "ps.fonttype": 42,
-    })
+    plt.rcParams.update(
+        {
+            "font.size": 11,
+            "axes.labelsize": 12,
+            "axes.titlesize": 12,
+            "xtick.labelsize": 10,
+            "ytick.labelsize": 10,
+            "legend.fontsize": 10,
+            "axes.linewidth": 1.0,
+            "xtick.major.width": 1.0,
+            "ytick.major.width": 1.0,
+            "xtick.major.size": 4,
+            "ytick.major.size": 4,
+            "pdf.fonttype": 42,
+            "ps.fonttype": 42,
+        }
+    )
 
     for group in experiment_groups:
         if group not in processed_results or not processed_results[group]:
@@ -427,35 +427,13 @@ def plot_publication_metric(
 
         fig, ax = plt.subplots(figsize=figsize)
 
-        ax.plot(
-            x, avg_1,
-            marker="o",
-            linewidth=linewidth,
-            markersize=markersize,
-            label=label_1
-        )
+        ax.plot(x, avg_1, marker="o", linewidth=linewidth, markersize=markersize, label=label_1)
 
-        ax.plot(
-            x, avg_2,
-            marker="s",
-            linewidth=linewidth,
-            markersize=markersize,
-            label=label_2
-        )
+        ax.plot(x, avg_2, marker="s", linewidth=linewidth, markersize=markersize, label=label_2)
 
         if use_std:
-            ax.fill_between(
-                x,
-                avg_1 - std_1,
-                avg_1 + std_1,
-                alpha=0.18
-            )
-            ax.fill_between(
-                x,
-                avg_2 - std_2,
-                avg_2 + std_2,
-                alpha=0.18
-            )
+            ax.fill_between(x, avg_1 - std_1, avg_1 + std_1, alpha=0.18)
+            ax.fill_between(x, avg_2 - std_2, avg_2 + std_2, alpha=0.18)
 
         ax.set_xlabel(group)
         ax.set_ylabel(ylabel)

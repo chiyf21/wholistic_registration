@@ -5,20 +5,20 @@ Date: 2025/4/10
 
 Overview:
     This script provides functions for visualizing 2D and 3D images, as well as overlaying motion fields on 2D images.
-    
+
 Functions:
     1. visualize_2d_image:
         Visualizes a single 2D image.
-    
+
     2. visualize_3d_image:
         Visualizes a 3D image or volume using a specific slice along one axis (e.g., z-axis).
-    
+
     3. overlay_motion_on_2d:
         Overlays a motion field on a 2D image and displays the result.
-    
+
 Usage:
     - Import this script and use the functions to visualize image data.
-    
+
     Example:
         import visualization
         img_2d = np.random.rand(256, 256)
@@ -30,10 +30,11 @@ Usage:
 # FIX: removed duplicate numpy/matplotlib imports and unused Axes3D import.
 # Made plotly and ipywidgets lazy imports so the module doesn't fail if they
 # aren't installed (they're only needed by specific functions).
-import numpy as np
-import matplotlib.pyplot as plt
-import matplotlib.colors as mcolors
 import os
+
+import matplotlib.pyplot as plt
+import numpy as np
+
 
 def auto_contrast(img, low_percentile=1, high_percentile=99):
     img = img.astype(np.float32)
@@ -41,10 +42,13 @@ def auto_contrast(img, low_percentile=1, high_percentile=99):
     img_clipped = np.clip(img, p_low, p_high)
     return (img_clipped - p_low) / (p_high - p_low + 1e-8)
 
-def visualize_2d_image(image, cmap='gray', title='2D Image',threshold=None,autocontrast=True,figsize=(8,8)):
+
+def visualize_2d_image(
+    image, cmap="gray", title="2D Image", threshold=None, autocontrast=True, figsize=(8, 8)
+):
     """
     Visualizes a single 2D image.
-    
+
     Args:
         image (ndarray): The 2D image to display.
         cmap (str): The colormap to use for visualization.
@@ -58,7 +62,7 @@ def visualize_2d_image(image, cmap='gray', title='2D Image',threshold=None,autoc
             plt.imshow(image, cmap=cmap)
 
         plt.title(title)
-        plt.axis('off')  # Hide axes for a cleaner visualization
+        plt.axis("off")  # Hide axes for a cleaner visualization
         plt.colorbar()
         plt.show()
     else:
@@ -68,11 +72,14 @@ def visualize_2d_image(image, cmap='gray', title='2D Image',threshold=None,autoc
         else:
             plt.imshow(image, cmap=cmap)
         plt.title(title)
-        plt.axis('off')  # Hide axes for a cleaner visualization
+        plt.axis("off")  # Hide axes for a cleaner visualization
         plt.colorbar()
         plt.show()
 
-def visualize_3d_image(image, slice_axis=2, cmap='gray', title='3D Image Slice',autocontrast = False):
+
+def visualize_3d_image(
+    image, slice_axis=2, cmap="gray", title="3D Image Slice", autocontrast=False
+):
     """
     Interactive viewer for a 3D image stack using ipywidgets.
 
@@ -82,7 +89,7 @@ def visualize_3d_image(image, slice_axis=2, cmap='gray', title='3D Image Slice',
         cmap (str): matplotlib colormap
         title (str): plot title prefix
     """
-    from ipywidgets import interact, IntSlider
+    from ipywidgets import IntSlider, interact
 
     if image.ndim != 3:
         raise ValueError("image must be a 3D ndarray")
@@ -112,18 +119,15 @@ def visualize_3d_image(image, slice_axis=2, cmap='gray', title='3D Image Slice',
     interact(
         _show_slice,
         slice_index=IntSlider(
-            min=0,
-            max=max_index,
-            step=1,
-            value=max_index // 2,
-            description='Slice'
-        )
+            min=0, max=max_index, step=1, value=max_index // 2, description="Slice"
+        ),
     )
+
 
 def quivermotion_py(template, r, motion_field, save_path=None, file_name=None):
     """
     Display and optionally save an image with an overlay of the motion field (similar to MATLAB's quivermotion_Chi).
-    
+
     Parameters:
         template (ndarray): Original image(H, W) or (H, W, C)
         r (int): Subsampling step size
@@ -132,10 +136,10 @@ def quivermotion_py(template, r, motion_field, save_path=None, file_name=None):
         file_name (str): optional, name of the file to save the image (.png extension)
     """
     H, W = template.shape[:2]
-    
+
     # sample coordinates for quiver
-    x_indices = np.arange(r, W, 2*r + 1)
-    y_indices = np.arange(r, H, 2*r + 1)
+    x_indices = np.arange(r, W, 2 * r + 1)
+    y_indices = np.arange(r, H, 2 * r + 1)
     x_sub, y_sub = np.meshgrid(x_indices, y_indices)
 
     # extract u, v components (note the order [v, u])
@@ -146,21 +150,33 @@ def quivermotion_py(template, r, motion_field, save_path=None, file_name=None):
 
     # display the image with motion field overlay
     plt.figure(figsize=(8, 8))
-    plt.imshow(template, cmap='gray', origin='upper')
+    plt.imshow(template, cmap="gray", origin="upper")
     # plt.quiver(x_sub, y_sub, u_sub, -v_sub, color='g', angles='xy', scale_units='xy', alpha=1,scale=0.7, linewidth=2.0)
-    plt.quiver(x_sub, y_sub, u_sub, -v_sub, color='g', angles='xy', scale_units='xy', alpha=1,scale=1.2, linewidth=2.0)
+    plt.quiver(
+        x_sub,
+        y_sub,
+        u_sub,
+        -v_sub,
+        color="g",
+        angles="xy",
+        scale_units="xy",
+        alpha=1,
+        scale=1.2,
+        linewidth=2.0,
+    )
     plt.title("Motion Field Overlay on Image")
-    plt.axis('off')
+    plt.axis("off")
 
     # save the figure
     if save_path and file_name:
         os.makedirs(save_path, exist_ok=True)
         save_file = os.path.join(save_path, file_name)
-        plt.savefig(save_file, dpi=300, bbox_inches='tight')
+        plt.savefig(save_file, dpi=300, bbox_inches="tight")
         print(f"✅ Saved to: {save_file}")
 
     plt.show()
-    
+
+
 def plot_deformed_grid_plotly(
     phase=None,
     motion=None,
@@ -282,7 +298,7 @@ def plot_deformed_grid_plotly(
     """
     import numpy as np
     import plotly.graph_objects as go
-    from scipy.ndimage import zoom, gaussian_filter
+    from scipy.ndimage import gaussian_filter, zoom
 
     # ------------------------------------------------------------
     # Helper: convert single plane to stack with K=1
@@ -299,9 +315,7 @@ def plot_deformed_grid_plotly(
             pass
 
         else:
-            raise ValueError(
-                f"{name} must have shape (H, W, 3) or (H, W, K, 3), got {arr.shape}"
-            )
+            raise ValueError(f"{name} must have shape (H, W, 3) or (H, W, K, 3), got {arr.shape}")
 
         return arr
 
@@ -331,7 +345,7 @@ def plot_deformed_grid_plotly(
                     f"Expected K={K}, got {z0_arr.size}"
                 )
 
-        xx, yy = np.meshgrid(np.arange(H), np.arange(W), indexing='ij')
+        xx, yy = np.meshgrid(np.arange(H), np.arange(W), indexing="ij")
 
         Xmap = np.empty((H, W, K), dtype=np.float32)
         Ymap = np.empty((H, W, K), dtype=np.float32)
@@ -407,44 +421,50 @@ def plot_deformed_grid_plotly(
 
         # Optional surface
         if show_surface:
-            fig.add_trace(go.Surface(
-                x=Xplot,
-                y=Yplot,
-                z=Zplot,
-                opacity=surface_opacity,
-                showscale=False,
-                showlegend=False
-            ))
+            fig.add_trace(
+                go.Surface(
+                    x=Xplot,
+                    y=Yplot,
+                    z=Zplot,
+                    opacity=surface_opacity,
+                    showscale=False,
+                    showlegend=False,
+                )
+            )
 
         # Horizontal grid lines
         for i in range(0, H2, step):
-            fig.add_trace(go.Scatter3d(
-                x=Xplot[i, :],
-                y=Yplot[i, :],
-                z=Zplot[i, :],
-                mode='lines',
-                line=dict(width=line_width),
-                name=f"slice {k}" if i == 0 else None,
-                showlegend=(i == 0)
-            ))
+            fig.add_trace(
+                go.Scatter3d(
+                    x=Xplot[i, :],
+                    y=Yplot[i, :],
+                    z=Zplot[i, :],
+                    mode="lines",
+                    line=dict(width=line_width),
+                    name=f"slice {k}" if i == 0 else None,
+                    showlegend=(i == 0),
+                )
+            )
 
         # Vertical grid lines
         for j in range(0, W2, step):
-            fig.add_trace(go.Scatter3d(
-                x=Xplot[:, j],
-                y=Yplot[:, j],
-                z=Zplot[:, j],
-                mode='lines',
-                line=dict(width=line_width),
-                showlegend=False
-            ))
+            fig.add_trace(
+                go.Scatter3d(
+                    x=Xplot[:, j],
+                    y=Yplot[:, j],
+                    z=Zplot[:, j],
+                    mode="lines",
+                    line=dict(width=line_width),
+                    showlegend=False,
+                )
+            )
 
     # ------------------------------------------------------------
     # Axis settings
     # ------------------------------------------------------------
-    xaxis_dict = dict(title='Ref X')
-    yaxis_dict = dict(title='Ref Y')
-    zaxis_dict = dict(title='Ref Z')
+    xaxis_dict = dict(title="Ref X")
+    yaxis_dict = dict(title="Ref Y")
+    zaxis_dict = dict(title="Ref Z")
 
     if xlim is not None:
         xaxis_dict["range"] = list(xlim)
@@ -454,13 +474,8 @@ def plot_deformed_grid_plotly(
         zaxis_dict["range"] = list(zlim)
 
     fig.update_layout(
-        scene=dict(
-            xaxis=xaxis_dict,
-            yaxis=yaxis_dict,
-            zaxis=zaxis_dict,
-            aspectmode='data'
-        ),
-        title=title
+        scene=dict(xaxis=xaxis_dict, yaxis=yaxis_dict, zaxis=zaxis_dict, aspectmode="data"),
+        title=title,
     )
 
     fig.show()
@@ -468,8 +483,10 @@ def plot_deformed_grid_plotly(
     if return_fig:
         return fig
 
-def plot_sequence(sequence, title='Sequence Plot', xlabel='Index', ylabel='Value',
-                  marker=None, figsize=(8, 4)):
+
+def plot_sequence(
+    sequence, title="Sequence Plot", xlabel="Index", ylabel="Value", marker=None, figsize=(8, 4)
+):
     """
     Plot a 1D sequence as a line chart.
 

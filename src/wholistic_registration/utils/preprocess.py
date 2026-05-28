@@ -1,4 +1,4 @@
-'''
+"""
 
 version : 0.1
 file name: preprocess.py
@@ -7,7 +7,7 @@ Code Author : Wei Zheng for matlab and Yunfeng Chi (Tsinghua University) for pyt
 Last Update Date : 2025/8/05
 
 Overview:
-    This module provides functions for preprocessing 3D volumetric data, including normalization, smoothness penalty factor calculation, robust mean and standard deviation computation, and artificial motion generation. 
+    This module provides functions for preprocessing 3D volumetric data, including normalization, smoothness penalty factor calculation, robust mean and standard deviation computation, and artificial motion generation.
 
 functions:
     - auto_contrast(img, low_percentile=3, high_percentile=97): Applies automatic contrast adjustment to an image based on specified percentiles.
@@ -15,13 +15,13 @@ functions:
     - robust_mean_std(data, percentile=95): Computes the mean and standard deviation of the lowest specified percentile of pixel values in an image.
     - normalize_to_255(img, lower_percentile=3, upper_percentile=99): Normalizes an image to the range [0, 255] based on specified percentiles.
     - generate_artificial_motion(image, art_R, Amp_art, zRatio, noise_level): Generates artificial motion in a 3D image and applies Gaussian noise, returning both the moved and reference images along with the true motion field.
-    
-'''
+
+"""
+
 import numpy as np
-from scipy.ndimage import gaussian_filter
-import numpy as np
-from scipy.ndimage import gaussian_filter, map_coordinates
 import scipy.ndimage as ndi
+from scipy.ndimage import gaussian_filter, map_coordinates
+
 
 def auto_contrast(img, low_percentile=3, high_percentile=97):
     """
@@ -37,6 +37,7 @@ def auto_contrast(img, low_percentile=3, high_percentile=97):
     p_low, p_high = np.percentile(img, [low_percentile, high_percentile])
     img_clipped = np.clip(img, p_low, p_high)
     return (img_clipped - p_low) / (p_high - p_low + 1e-8)
+
 
 def getSmPnltNormFctr(dat_ref, option):
     """
@@ -54,11 +55,11 @@ def getSmPnltNormFctr(dat_ref, option):
     Iy = (dat_ref[:, 2:, :] - dat_ref[:, :-2, :]) / 2
 
     # Apply the mask to exclude certain areas from the calculation
-    mask_ref = option['mask_ref']
-    
+    mask_ref = option["mask_ref"]
+
     # Calculate the mean squared gradients while excluding the masked areas
-    Ix_squared = np.mean(Ix[~mask_ref[1:-1, :, :]]**2)
-    Iy_squared = np.mean(Iy[~mask_ref[:, 1:-1, :]]**2)
+    Ix_squared = np.mean(Ix[~mask_ref[1:-1, :, :]] ** 2)
+    Iy_squared = np.mean(Iy[~mask_ref[:, 1:-1, :]] ** 2)
 
     # Return the average of the squared gradients in both directions
     factor = (Ix_squared + Iy_squared) / 2
@@ -79,10 +80,11 @@ def robust_mean_std(data, percentile=95):
     threshold = np.percentile(data_flat, percentile)
     mask = data_flat <= threshold
     selected = data_flat[mask]
-    
+
     return np.mean(selected), np.std(selected)
 
-def normalize_to_255(img,lower_percentile=3,upper_percentile=99):
+
+def normalize_to_255(img, lower_percentile=3, upper_percentile=99):
     """
     Normalizes an image to the range [0, 255] based on specified percentiles.
     Parameters:
@@ -94,11 +96,12 @@ def normalize_to_255(img,lower_percentile=3,upper_percentile=99):
     """
     lower = np.percentile(img, lower_percentile)
     upper = np.percentile(img, upper_percentile)
-    
+
     clipped = np.clip(img, lower, upper)
-    
+
     norm_img = (clipped - lower) / (upper - lower + 1e-8) * 255
     return norm_img.astype(np.float64)
+
 
 def learn_quantile_mapping(
     source,
@@ -118,11 +121,7 @@ def learn_quantile_mapping(
         tgt_q: target quantile anchors
     """
     if percentiles is None:
-        percentiles = [
-            0.1, 0.5, 1, 2, 5,
-            10, 25, 50, 75, 90,
-            95, 99, 99.5, 99.8
-        ]
+        percentiles = [0.1, 0.5, 1, 2, 5, 10, 25, 50, 75, 90, 95, 99, 99.5, 99.8]
 
     source = np.asarray(source)
     target = np.asarray(target)
@@ -149,6 +148,7 @@ def learn_quantile_mapping(
     tgt_q_unique = tgt_q[unique_idx]
 
     return src_q_unique, tgt_q_unique, np.asarray(percentiles)[unique_idx]
+
 
 def apply_quantile_mapping(
     source,
@@ -193,6 +193,7 @@ def apply_quantile_mapping(
         out[i0:i1] = mapped.astype(out_dtype)
 
     return out
+
 
 def generate_artificial_motion(image, art_R, Amp_art, zRatio, noise_level):
     """
@@ -243,17 +244,11 @@ def generate_artificial_motion(image, art_R, Amp_art, zRatio, noise_level):
 
     # apply the motion to the image using interpolation
     def apply_motion(img, motion):
-        #generate original grid coordinates
-        yy, xx, zz = np.meshgrid(
-            np.arange(Y), np.arange(X), np.arange(Z), indexing='ij'
-        )
-        coords_warped = np.array([
-            yy + motion[..., 1],
-            xx + motion[..., 0],
-            zz + motion[..., 2]
-        ])
+        # generate original grid coordinates
+        yy, xx, zz = np.meshgrid(np.arange(Y), np.arange(X), np.arange(Z), indexing="ij")
+        coords_warped = np.array([yy + motion[..., 1], xx + motion[..., 0], zz + motion[..., 2]])
         # project the warped coordinates back to the original image space using interpolation
-        return map_coordinates(img, coords_warped, order=1, mode='nearest')
+        return map_coordinates(img, coords_warped, order=1, mode="nearest")
 
     # Remind the motion: dat_mov is the result after adding motion (forward), while correctMotion_Wei is reverse sampling
     dat_mov_raw = apply_motion(image, -motion_current_real)
@@ -266,7 +261,6 @@ def generate_artificial_motion(image, art_R, Amp_art, zRatio, noise_level):
     return dat_mov, dat_ref, motion_current_real
 
 
-
 def michelson_edge_map(frame, sigma_xy=3, r=6, eps=1e-6):
     # frame: (Y,X), float in [0,1]
     # 1) denoise a bit
@@ -274,97 +268,94 @@ def michelson_edge_map(frame, sigma_xy=3, r=6, eps=1e-6):
     # 2) gradients and unit normal
     gx = ndi.sobel(fs, axis=-1, mode="nearest")
     gy = ndi.sobel(fs, axis=-2, mode="nearest")
-    nrm = np.sqrt(gx*gx + gy*gy) + eps
-    ux, uy = gx/nrm, gy/nrm  # edge normal direction
+    nrm = np.sqrt(gx * gx + gy * gy) + eps
+    ux, uy = gx / nrm, gy / nrm  # edge normal direction
     # 3) sample intensities on two sides along the normal
     H, W = frame.shape
     y, x = np.mgrid[0:H, 0:W]
-    y_plus  = np.clip(y + r*uy, 0, H-1)
-    x_plus  = np.clip(x + r*ux, 0, W-1)
-    y_minus = np.clip(y - r*uy, 0, H-1)
-    x_minus = np.clip(x - r*ux, 0, W-1)
-    I_plus  = map_coordinates(fs, [y_plus,  x_plus],  order=1, mode="nearest")
+    y_plus = np.clip(y + r * uy, 0, H - 1)
+    x_plus = np.clip(x + r * ux, 0, W - 1)
+    y_minus = np.clip(y - r * uy, 0, H - 1)
+    x_minus = np.clip(x - r * ux, 0, W - 1)
+    I_plus = map_coordinates(fs, [y_plus, x_plus], order=1, mode="nearest")
     I_minus = map_coordinates(fs, [y_minus, x_minus], order=1, mode="nearest")
     # 4) Michelson-normalized edge strength (absolute value)
     E = (I_plus - I_minus) / (I_plus + I_minus + eps)
 
-    return np.abs(E) 
+    return np.abs(E)
 
-def normalize_std(mean,std, image:np.ndarray):
-    mean_prev=np.mean(image)
-    std_prev=np.std(image)
-    image_normalized=(image-mean_prev)/std_prev
-    image_corrected=image_normalized*std+mean
+
+def normalize_std(mean, std, image: np.ndarray):
+    mean_prev = np.mean(image)
+    std_prev = np.std(image)
+    image_normalized = (image - mean_prev) / std_prev
+    image_corrected = image_normalized * std + mean
     return image_corrected
+
+
 def canny_edge_map(frame, sigma=1.0, low_threshold=0.05, high_threshold=0.15, eps=1e-6):
     # frame: (Y,X), float in [0,1]
     # 1) Gaussian denoise
     smoothed = ndi.gaussian_filter(frame, sigma=sigma, mode="nearest")
-    
+
     # 2) gradients and unit normal
     gx = ndi.sobel(smoothed, axis=-1, mode="nearest")  # x gradient
     gy = ndi.sobel(smoothed, axis=-2, mode="nearest")  # y gradient
-    
-    grad_mag = np.sqrt(gx**2 + gy**2 + eps)  
-    grad_dir = np.arctan2(gy, gx) * (180 / np.pi)  
-    grad_dir = np.abs(grad_dir)  
-    
+
+    grad_mag = np.sqrt(gx**2 + gy**2 + eps)
+    grad_dir = np.arctan2(gy, gx) * (180 / np.pi)
+    grad_dir = np.abs(grad_dir)
+
     H, W = frame.shape
     suppressed = np.zeros((H, W), dtype=np.float32)
-    
-    for i in range(1, H-1):
-        for j in range(1, W-1):
+
+    for i in range(1, H - 1):
+        for j in range(1, W - 1):
             angle = grad_dir[i, j]
-            
 
             if (0 <= angle < 22.5) or (157.5 <= angle < 180):
-
-                neighbors = [grad_mag[i, j-1], grad_mag[i, j+1]]
+                neighbors = [grad_mag[i, j - 1], grad_mag[i, j + 1]]
             elif 22.5 <= angle < 67.5:
-
-                neighbors = [grad_mag[i-1, j+1], grad_mag[i+1, j-1]]
+                neighbors = [grad_mag[i - 1, j + 1], grad_mag[i + 1, j - 1]]
             elif 67.5 <= angle < 112.5:
-
-                neighbors = [grad_mag[i-1, j], grad_mag[i+1, j]]
+                neighbors = [grad_mag[i - 1, j], grad_mag[i + 1, j]]
             else:  # 112.5 <= angle < 157.5
-
-                neighbors = [grad_mag[i-1, j-1], grad_mag[i+1, j+1]]
-            
+                neighbors = [grad_mag[i - 1, j - 1], grad_mag[i + 1, j + 1]]
 
             if grad_mag[i, j] >= max(neighbors):
                 suppressed[i, j] = grad_mag[i, j]
-    
 
     suppressed = (suppressed - suppressed.min()) / (suppressed.max() - suppressed.min() + eps)
-    
 
-    high_mask = suppressed >= high_threshold  
+    high_mask = suppressed >= high_threshold
     low_mask = (suppressed >= low_threshold) & ~high_mask  #
-    
 
     edges = high_mask.copy().astype(np.float32)
-    connectivity = ndi.generate_binary_structure(2, 2)  
-    
+    connectivity = ndi.generate_binary_structure(2, 2)
 
     connected_weak = ndi.binary_dilation(high_mask, structure=connectivity) & low_mask
     edges[connected_weak] = 1.0
-    
+
     return edges
 
-def Yunfeng_edge_map(frame,r=1,sigma=4,outcoef=3,min_size=40):
-    
-    frame_smooth =cp.asarray(ndi.gaussian_filter(frame, sigma=sigma, mode="nearest"))
-    #initialize
-    average_kernel=cp.ones((2*r+1,2*r+1),dtype=np.float64)
-    average_kernel=average_kernel/((2*r+1)**2-1)
-    average_kernel[r,r]=0
-    #calculate average
-    EX=calculate.imfilter(frame_smooth,average_kernel,boundary='replicate',output='same',functionality="corr")
-    EX_square=calculate.imfilter(frame_smooth**2,average_kernel,boundary='replicate',output='same',functionality="corr")
-    std=np.sqrt(EX_square-EX**2)
-    Norm=(frame_smooth-EX)/std
-    edges_result = cp.where((Norm>outcoef)|(Norm < -outcoef), 1., 0.)
-    edges_init = edges_result.get() if hasattr(edges_result, 'get') else edges_result
+
+def Yunfeng_edge_map(frame, r=1, sigma=4, outcoef=3, min_size=40):
+    frame_smooth = cp.asarray(ndi.gaussian_filter(frame, sigma=sigma, mode="nearest"))
+    # initialize
+    average_kernel = cp.ones((2 * r + 1, 2 * r + 1), dtype=np.float64)
+    average_kernel = average_kernel / ((2 * r + 1) ** 2 - 1)
+    average_kernel[r, r] = 0
+    # calculate average
+    EX = calculate.imfilter(
+        frame_smooth, average_kernel, boundary="replicate", output="same", functionality="corr"
+    )
+    EX_square = calculate.imfilter(
+        frame_smooth**2, average_kernel, boundary="replicate", output="same", functionality="corr"
+    )
+    std = np.sqrt(EX_square - EX**2)
+    Norm = (frame_smooth - EX) / std
+    edges_result = cp.where((Norm > outcoef) | (Norm < -outcoef), 1.0, 0.0)
+    edges_init = edges_result.get() if hasattr(edges_result, "get") else edges_result
     # edges_smooth=ndi.gaussian_filter(edges_init, sigma=3, mode="nearest")>0.3
     labeled_img = label(edges_init, connectivity=2)
     regions = regionprops(labeled_img)
@@ -374,6 +365,5 @@ def Yunfeng_edge_map(frame,r=1,sigma=4,outcoef=3,min_size=40):
             labeled_img[coords[:, 0], coords[:, 1]] = 0
 
     edges_filtered = np.asarray((labeled_img > 0).astype(np.float32))
-    
-    return edges_filtered 
 
+    return edges_filtered

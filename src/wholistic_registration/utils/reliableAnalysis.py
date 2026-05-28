@@ -1,17 +1,18 @@
 # reliablemask.py
-from . import cp
-from . import cupy_ndimage
-from . import IO
-import numpy as np
-import tifffile
 import os
-from skimage.metrics import structural_similarity  as ssim
-from scipy.ndimage import gaussian_filter
 import re
 
+import numpy as np
+import tifffile
+from scipy.ndimage import gaussian_filter
+from skimage.metrics import structural_similarity as ssim
 
-def write_multichannel_volume_as_ome_tiff(vol3d_list, out_dir, frame_idx, configPath=None,
-                                          spacing_x=1.0, spacing_y=1.0):
+from . import IO, cp, cupy_ndimage
+
+
+def write_multichannel_volume_as_ome_tiff(
+    vol3d_list, out_dir, frame_idx, configPath=None, spacing_x=1.0, spacing_y=1.0
+):
     """
     vol3d_list: list of 3 arrays, each (Z,Y,X)
         ch0, ch1, ch2
@@ -32,32 +33,23 @@ def write_multichannel_volume_as_ome_tiff(vol3d_list, out_dir, frame_idx, config
         processed.append(v)
 
     Z, Y, X = processed[0].shape
-    img5d = np.stack(processed, axis=0)     # (3, Z, Y, X)
-    img5d = img5d[np.newaxis, :, :, :, :]   # (1,3,Z,Y,X)
+    img5d = np.stack(processed, axis=0)  # (3, Z, Y, X)
+    img5d = img5d[np.newaxis, :, :, :, :]  # (1,3,Z,Y,X)
     img5d = np.transpose(img5d, (0, 2, 1, 3, 4))  # → (1,Z,3,Y,X)
 
     fname = os.path.join(out_dir, f"vol_{frame_idx:06d}_masked.tif")
 
-    metadata = {
-        'spacing_x': spacing_x,
-        'spacing_y': spacing_y,
-        'data_shape': img5d.shape
-    }
+    metadata = {"spacing_x": spacing_x, "spacing_y": spacing_y, "data_shape": img5d.shape}
 
-    IO.saveTiff_new(
-        img5d,
-        fname,
-        config_path=configPath,
-        metadata=metadata,
-        verbose=False
-    )
+    IO.saveTiff_new(img5d, fname, config_path=configPath, metadata=metadata, verbose=False)
 
-#pre version
-def local_ssim_difference(I_ref,I_mov,win_size=11,use_3d=False,sigma_3d=1.5):
+
+# pre version
+def local_ssim_difference(I_ref, I_mov, win_size=11, use_3d=False, sigma_3d=1.5):
     """
     Compute local SSIM difference map (0~1) between two images.
-    Supports 2D and 3D images. 
-    
+    Supports 2D and 3D images.
+
     Parameters
     ----------
     I_ref : np.ndarray
@@ -77,12 +69,12 @@ def local_ssim_difference(I_ref,I_mov,win_size=11,use_3d=False,sigma_3d=1.5):
     D : np.ndarray, float32
         Difference map in [0,1], same shape as input.
     """
-    I_ref=I_ref.astype(np.float32)
-    I_mov=I_mov.astype(np.float32)
-    
+    I_ref = I_ref.astype(np.float32)
+    I_mov = I_mov.astype(np.float32)
+
     if I_ref.ndim not in [2, 3]:
         raise ValueError("Input images must be 2D or 3D numpy arrays.")
-    
+
     if I_ref.shape != I_mov.shape:
         raise ValueError("Input images must have the same shape.")
     # -----------------------
@@ -90,11 +82,12 @@ def local_ssim_difference(I_ref,I_mov,win_size=11,use_3d=False,sigma_3d=1.5):
     # -----------------------
     if I_ref.ndim == 2:
         _, ssim_map = ssim(
-            I_ref, I_mov,
+            I_ref,
+            I_mov,
             win_size=win_size,
             gaussian_weights=True,
             data_range=I_ref.max() - I_ref.min(),
-            full=True
+            full=True,
         )
         D = (1 - ssim_map) / 2.0
         return np.clip(D.astype(np.float32), 0, 1)
@@ -109,20 +102,21 @@ def local_ssim_difference(I_ref,I_mov,win_size=11,use_3d=False,sigma_3d=1.5):
 
         for z in range(Z):
             _, ssim_map = ssim(
-                I_ref[z], I_mov[z],
+                I_ref[z],
+                I_mov[z],
                 win_size=win_size,
                 gaussian_weights=True,
                 data_range=I_ref[z].max() - I_ref[z].min(),
-                full=True
+                full=True,
             )
             D[z] = (1 - ssim_map) / 2.0
-        
+
         return np.clip(D, 0, 1)
 
     else:
         # --- True 3D SSIM approximation using Gaussian filters
         #     (Useful only if Z-resolution is comparable to XY)
-        
+
         C1 = (0.01 * (I_ref.max() - I_ref.min())) ** 2
         C2 = (0.03 * (I_ref.max() - I_ref.min())) ** 2
 
@@ -145,7 +139,8 @@ def local_ssim_difference(I_ref,I_mov,win_size=11,use_3d=False,sigma_3d=1.5):
 
         return np.clip(D.astype(np.float32), 0, 1)
 
-#pre version
+
+# pre version
 def local_mind_difference(
     I_ref,
     I_mov,
@@ -178,13 +173,13 @@ def local_mind_difference(
     # ---------------------------
     def _mind_offsets_2d(radius):
         return [
-            ( radius, 0),
+            (radius, 0),
             (-radius, 0),
-            (0,  radius),
+            (0, radius),
             (0, -radius),
-            ( radius,  radius),
-            ( radius, -radius),
-            (-radius,  radius),
+            (radius, radius),
+            (radius, -radius),
+            (-radius, radius),
             (-radius, -radius),
         ]
 
@@ -206,12 +201,13 @@ def local_mind_difference(
         V = cp.mean(D, axis=0) + eps
         MIND = cp.exp(-D / V[None])
         return MIND
+
     def _soft_structure_weight(S, tau, beta):
         """
         Sigmoid soft structure mask
         """
         return 1.0 / (1.0 + cp.exp(-(S - tau) / beta))
-    
+
     def _mind_diff_2d(Ir, Im):
         M_ref = _mind_descriptor_2d(Ir)
         M_mov = _mind_descriptor_2d(Im)
@@ -220,14 +216,10 @@ def local_mind_difference(
 
         structure_mov = cp.mean(M_mov, axis=0)
         structure_mov = cupy_ndimage.gaussian_filter(structure_mov, sigma=patch_sigma)
-        weight_mov = _soft_structure_weight(
-            structure_mov, structure_tau, structure_beta
-        )
+        weight_mov = _soft_structure_weight(structure_mov, structure_tau, structure_beta)
         structure_ref = cp.mean(M_ref, axis=0)
         structure_ref = cupy_ndimage.gaussian_filter(structure_ref, sigma=patch_sigma)
-        weight_ref = _soft_structure_weight(
-            structure_ref, structure_tau, structure_beta
-        )
+        weight_ref = _soft_structure_weight(structure_ref, structure_tau, structure_beta)
         weight = cp.maximum(weight_ref, weight_mov)
 
         diff = diff * weight
@@ -235,8 +227,10 @@ def local_mind_difference(
         if debug_dir is not None:
             os.makedirs(debug_dir, exist_ok=True)
             tifffile.imwrite(os.path.join(debug_dir, "M_ref.tif"), M_ref.get())
-            tifffile.imwrite(os.path.join(debug_dir, "diff_raw.tif"),
-                             cp.abs(cp.mean(M_ref - M_mov, axis=0)).get())
+            tifffile.imwrite(
+                os.path.join(debug_dir, "diff_raw.tif"),
+                cp.abs(cp.mean(M_ref - M_mov, axis=0)).get(),
+            )
             tifffile.imwrite(os.path.join(debug_dir, "weight_map.tif"), weight.get())
             tifffile.imwrite(os.path.join(debug_dir, "diff_weighted.tif"), diff.get())
 
@@ -264,7 +258,8 @@ def local_mind_difference(
     else:
         raise ValueError("Only 2D or 3D images are supported")
 
-#pre version
+
+# pre version
 def local_zscore_difference(
     I_ref,
     I_mov,
@@ -272,7 +267,7 @@ def local_zscore_difference(
     eps=1e-6,
     p_mu=20,
     p_var=40,
-    clip=(0,10),
+    clip=(0, 10),
     debug_dir=None,
 ):
     """
@@ -295,10 +290,10 @@ def local_zscore_difference(
 
     threshold_mu_ref = np.percentile(mu_ref, p_mu)
     threshold_var_ref = np.percentile(var_ref, p_var)
-    mask_ref = (mu_ref>threshold_mu_ref) & (var_ref>threshold_var_ref)
+    mask_ref = (mu_ref > threshold_mu_ref) & (var_ref > threshold_var_ref)
     threshold_mu_mov = np.percentile(mu_mov, p_mu)
     threshold_var_mov = np.percentile(var_mov, p_var)
-    mask_mov = (mu_mov>threshold_mu_mov) & (var_mov>threshold_var_mov)
+    mask_mov = (mu_mov > threshold_mu_mov) & (var_mov > threshold_var_mov)
     mask = mask_ref | mask_mov
 
     if debug_dir is not None:
@@ -313,16 +308,12 @@ def local_zscore_difference(
     D = np.abs(mu_ref - mu_mov) / denom * mask
     if clip is not None:
         D = np.clip(D, clip[0], clip[1])
-    D = (D / (clip[1] - clip[0]))
+    D = D / (clip[1] - clip[0])
     return D.astype(np.float32)
 
+
 # pre version
-def reliability_map(
-    I,
-    sigma=1.5,
-    eps=1e-6,
-    outlier_sigma=5.0
-):
+def reliability_map(I, sigma=1.5, eps=1e-6, outlier_sigma=5.0):
     I = I.astype(np.float32)
     mu = gaussian_filter(I, sigma)
     var = gaussian_filter(I**2, sigma) - mu**2
@@ -349,7 +340,7 @@ def reliability_map_v2(template, sigma=1.5, eps=1e-6):
     Output: float32 in [0,1]
     """
     template = cp.asarray(template, dtype=cp.float32)
-    is_2d = (template.ndim == 2)
+    is_2d = template.ndim == 2
 
     def gradient_amplitude(volume):
         gy = cupy_ndimage.sobel(volume, axis=0)
@@ -364,7 +355,7 @@ def reliability_map_v2(template, sigma=1.5, eps=1e-6):
             out[z] = cupy_ndimage.gaussian_filter(arr[z], sigma=sigma)
         return out
 
-    def weighted_quantile_cp(x, w,  eps=1e-12):
+    def weighted_quantile_cp(x, w, eps=1e-12):
         x = x.ravel()
         w = cp.clip(w.ravel(), 0, None)
 
@@ -387,13 +378,13 @@ def reliability_map_v2(template, sigma=1.5, eps=1e-6):
     Iz = (Iamp - Iamp_mu) / Iamp_sigma
     Iz_sm = gaussian_smooth_per_slice(Iz, sigma=sigma)
     tau_g = cp.std(Iz_sm) + eps
-    R_grad = cp.exp(-(Iz_sm ** 2) / (2 * tau_g ** 2))
+    R_grad = cp.exp(-(Iz_sm**2) / (2 * tau_g**2))
     R_grad = R_grad / (cp.max(R_grad) + eps)
     # intensity-based reliability
     g_mad = cp.median(cp.abs(Iamp - Iamp_mu)) + eps
     g_robust = (Iamp - Iamp_mu) / (1.4826 * g_mad + eps)
 
-    w_bg = cp.exp(-cp.clip(g_robust, -5, 5) ** 2 / 2.0)
+    w_bg = cp.exp(-(cp.clip(g_robust, -5, 5) ** 2) / 2.0)
     p_low = weighted_quantile_cp(template, w_bg)
     p_hi = cp.percentile(template, 99)
 
@@ -407,9 +398,10 @@ def reliability_map_v2(template, sigma=1.5, eps=1e-6):
 
     return cp.asnumpy(R)
 
+
 # pre version
 def photometric_align_robust(I_ref, I_mov, R, r_threshold=0.3, eps=1e-6):
-    valid = R > r_threshold
+    valid = r_threshold < R
 
     x = I_ref[valid].flatten()
     y = I_mov[valid].flatten()
@@ -420,9 +412,12 @@ def photometric_align_robust(I_ref, I_mov, R, r_threshold=0.3, eps=1e-6):
     I_mov_corr = (I_mov - b) / (a + eps)
     return I_mov_corr.astype(np.float32)
 
+
 def photometric_align_hist(I_ref, I_mov):
     from skimage.exposure import match_histograms
+
     return match_histograms(I_mov, I_ref).astype(np.float32)
+
 
 def structural_difference_map(
     I_ref,
@@ -449,11 +444,8 @@ def structural_difference_map(
     # Use minimum — only trust difference where BOTH images have structure.
     # np.maximum would flag background regions where only one image has structure,
     # producing false positives from intensity differences unrelated to misregistration.
-    R = np.maximum(R_ref, R_mov) # minimum?...
-    I_mov_corr = photometric_align_hist(
-        I_ref,
-        I_mov
-    )
+    R = np.maximum(R_ref, R_mov)  # minimum?...
+    I_mov_corr = photometric_align_hist(I_ref, I_mov)
     if len(I_ref.shape) == 2:
         mu_ref = gaussian_filter(I_ref, sigma_structure)
         mu_mov = gaussian_filter(I_mov_corr, sigma_structure)
@@ -467,7 +459,7 @@ def structural_difference_map(
 
     diff = np.abs(mu_ref - mu_mov)
 
-    valid_vals = diff[R > r_threshold]
+    valid_vals = diff[r_threshold < R]
 
     if len(valid_vals) > 100:
         scale = np.percentile(valid_vals, 99)
@@ -475,7 +467,7 @@ def structural_difference_map(
         scale = np.percentile(diff, 99)
 
     Z = diff / scale
-    D = 1.0 - np.exp(-Z**2)
+    D = 1.0 - np.exp(-(Z**2))
 
     D_final = D * R
 
@@ -486,6 +478,7 @@ def structural_difference_map(
         tifffile.imwrite(os.path.join(debug_dir, "D_difference.tif"), D)
 
     return D_final.astype(np.float32), D.astype(np.float32), R.astype(np.float32)
+
 
 def build_reference_index(ref_dir):
     """
@@ -516,17 +509,18 @@ def build_reference_index(ref_dir):
 
     return ref_map, ref_files
 
-#pre version
+
+# pre version
 def ComputeMask(
-                mem_dir,
-                ca_dir,
-                ref_dir,
-                out_dir,
-                dual_channel,
-                frames,
-                config,
-                compute_cor_fn,
-                configPath,
+    mem_dir,
+    ca_dir,
+    ref_dir,
+    out_dir,
+    dual_channel,
+    frames,
+    config,
+    compute_cor_fn,
+    configPath,
 ):
     """
     Computes spatial, temporal, and accumulative reliability masks.
@@ -568,27 +562,27 @@ def ComputeMask(
     """
 
     # Create output directories
-    mask_ds_dir = out_dir # Downsampled masks directory
-    
+    mask_ds_dir = out_dir  # Downsampled masks directory
+
     os.makedirs(mask_ds_dir, exist_ok=True)
-    
+
     # Build reference image index
     ref_map, ref_files = build_reference_index(ref_dir)
-    
+
     # Process each frame
     for i in frames:
         if i % 100 == 0:
             print(f"Processed {i}/{frames[-1]} frames")
-        
+
         # Read registered images
         mem_i = IO.read_reg_tiff(mem_dir, i, 1)  # Channel 1: membrane
         if dual_channel:
-            ca_i = IO.read_reg_tiff(ca_dir, i, 0)    # Channel 0: calcium
+            ca_i = IO.read_reg_tiff(ca_dir, i, 0)  # Channel 0: calcium
         else:
             ca_i = np.zeros_like(mem_i)
         # Compute correlation map
         cor_i = compute_cor_fn(mem_i, ca_i)
-        
+
         # Read corresponding reference image
         ref_i = tifffile.imread(ref_map[i])
 
@@ -596,39 +590,42 @@ def ComputeMask(
         # win_size = config['win_size']      # Window size for SSIM computation
         # use_3d = config['use_3d']          # Whether to use 3D SSIM
         # sigma_3d = config['sigma_3d']      # Sigma for 3D Gaussian blur
-        
+
         # Compute reliability mask using SSIM difference
         # mask_map = local_gradient_misalignment(cor_i, ref_i)
-        mask_map = local_zscore_difference(ref_i,
-                                        cor_i,
-                                        )
-        if isinstance(mask_map,np.ndarray):
+        mask_map = local_zscore_difference(
+            ref_i,
+            cor_i,
+        )
+        if isinstance(mask_map, np.ndarray):
             # Save downsampled mask
             IO.write_multichannel_volume_as_ome_tiff(
-                volume=[mask_map],      # single channel
+                volume=[mask_map],  # single channel
                 out_dir=out_dir,
                 frame_idx=i,
                 configPath=configPath,
-                label='mask'
+                label="mask",
             )
         else:
             IO.write_multichannel_volume_as_ome_tiff(
-                volume=[mask_map.get()],      # single channel
+                volume=[mask_map.get()],  # single channel
                 out_dir=out_dir,
                 frame_idx=i,
                 configPath=configPath,
-                label='mask'
+                label="mask",
             )
+
+
 def ComputeMask_v2(
-                mem_dir,
-                ca_dir,
-                ref_dir,
-                out_dir,
-                dual_channel,
-                frames,
-                config,
-                compute_cor_fn,
-                configPath,
+    mem_dir,
+    ca_dir,
+    ref_dir,
+    out_dir,
+    dual_channel,
+    frames,
+    config,
+    compute_cor_fn,
+    configPath,
 ):
     """
     Computes spatial, temporal, and accumulative reliability masks.
@@ -670,38 +667,45 @@ def ComputeMask_v2(
     """
 
     # Create output directories
-    mask_ds_dir = out_dir # Downsampled masks directory
-    
+    mask_ds_dir = out_dir  # Downsampled masks directory
+
     IO.reset_dir(mask_ds_dir)
-    
+
     # Build reference image index
     ref_map, ref_files = build_reference_index(ref_dir)
     ref_files = sorted(ref_files)  # Ensure files are processed in order
-    
-    # Process each frame
-    for i in range(len(ref_files)-1):
-        print(f"Compute difference between {ref_files[i]} and {ref_files[i+1]} ")
-    
-        ref_pre = tifffile.imread(os.path.join(ref_dir,ref_files[i]))
-        ref_post = tifffile.imread(os.path.join(ref_dir,ref_files[i+1]))
 
-        mask_map,diff_map,rely_map = structural_difference_map(ref_pre,
-                                        ref_post,
-                                        )
-        if isinstance(mask_map,np.ndarray):
+    # Process each frame
+    for i in range(len(ref_files) - 1):
+        print(f"Compute difference between {ref_files[i]} and {ref_files[i + 1]} ")
+
+        ref_pre = tifffile.imread(os.path.join(ref_dir, ref_files[i]))
+        ref_post = tifffile.imread(os.path.join(ref_dir, ref_files[i + 1]))
+
+        mask_map, diff_map, rely_map = structural_difference_map(
+            ref_pre,
+            ref_post,
+        )
+        if isinstance(mask_map, np.ndarray):
             # Save downsampled mask
             IO.write_multichannel_volume_as_ome_tiff(
-                volume=[ref_pre,ref_post,mask_map,diff_map,rely_map],      # single channel
+                volume=[ref_pre, ref_post, mask_map, diff_map, rely_map],  # single channel
                 out_dir=out_dir,
                 frame_idx=i,
                 configPath=configPath,
-                label='mask'
+                label="mask",
             )
         else:
             IO.write_multichannel_volume_as_ome_tiff(
-                volume=[ref_pre,ref_post,mask_map.get(),diff_map.get(),rely_map.get()],      # single channel
+                volume=[
+                    ref_pre,
+                    ref_post,
+                    mask_map.get(),
+                    diff_map.get(),
+                    rely_map.get(),
+                ],  # single channel
                 out_dir=out_dir,
                 frame_idx=i,
                 configPath=configPath,
-                label='mask'
+                label="mask",
             )

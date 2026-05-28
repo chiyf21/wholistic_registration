@@ -1,4 +1,4 @@
-'''
+"""
 
 version : 0.1
 file name: IO.py
@@ -9,28 +9,30 @@ Last Update Date : 2025/8/05
 Overview:
     This module provides functions to read metadata and frames from ND2 files, specifically designed for handling 3D imaging data. It includes functionality to read metadata, extract specific frames, and handle both single and multiple frame requests efficiently.
 
-        
+
 functions:
     - readMeta(filePath, Ifprint=True): Reads metadata from an ND2 file and optionally prints Z ratio and data size.
     - readFrame(filePath, frame, channel=0, to_memory=True): Reads specified frames from an ND2 file, supporting both single and multiple frame requests, and handles 5D data structures.
     - downsample_tiff_series(tiff_folder_or_list, xy_down=4, batch_processing=False, batch_size=50, verbose=True): Efficiently downsample a series of TIFF files using dask for lazy loading and parallel processing.
-    
-'''
-import nd2
-import numpy as np
-import toml
-import tifffile
+
+"""
+
 import json
-import zarr
+import os
+import shutil
+from glob import glob
+
 import dask
 import dask.array as da
 import dask.delayed
-from glob import glob
-import os
-import time
-import shutil
+import nd2
+import numpy as np
+import tifffile
+import toml
+import zarr
 
-def readMeta(filePath,Ifprint=True):
+
+def readMeta(filePath, Ifprint=True):
     """
     Reads metadata from an ND2 file and optionally prints Z ratio and data size.
 
@@ -43,22 +45,22 @@ def readMeta(filePath,Ifprint=True):
 
     """
     with nd2.ND2File(filePath) as f:
-        metadata=f.metadata
-        channels=metadata.channels[0]
+        metadata = f.metadata
+        channels = metadata.channels[0]
         if Ifprint:
-            #get Zratio
-            axesCalibration=channels.volume.axesCalibration
-            zRatio=axesCalibration[2]/axesCalibration[0]
+            # get Zratio
+            axesCalibration = channels.volume.axesCalibration
+            zRatio = axesCalibration[2] / axesCalibration[0]
             print("Z ratio is", zRatio)
-            #get size
-            print("Data size is",channels.volume.voxelCount)
-            #get total frames
-            print("Total frames is",f.sizes['T'])
+            # get size
+            print("Data size is", channels.volume.voxelCount)
+            # get total frames
+            print("Total frames is", f.sizes["T"])
 
     return metadata
-    
 
-def readMeta_new(filePath,Ifprint=True):
+
+def readMeta_new(filePath, Ifprint=True):
     """
     Reads metadata from an ND2 file and optionally prints Z ratio and data size.
 
@@ -79,26 +81,25 @@ def readMeta_new(filePath,Ifprint=True):
             resolutionxyz = ndf.metadata.channels[0].volume.axesCalibration
             spacing_x = resolutionxyz[0]
             spacing_y = resolutionxyz[1]
-            
+
             nchannels = len(ndf.metadata.channels)
             voxelCount = ndf.metadata.channels[0].volume.voxelCount
             nframes = ndf.shape[0]
-            
+
             nxpix = voxelCount[0]
             nypix = voxelCount[1]
             if len(voxelCount) > 2:
                 nzpix = voxelCount[2]
                 spacing_z = resolutionxyz[2]
-                zRatio = spacing_z/spacing_x
-                
+                zRatio = spacing_z / spacing_x
+
             else:
                 spacing_z = 1
                 zRatio = 1
                 nzpix = 1
 
-
-        metadata=ndf.metadata
-        channels=metadata.channels[0]
+        metadata = ndf.metadata
+        channels = metadata.channels[0]
 
         multichannel = True if nchannels > 1 else False
         multiz = True if nzpix > 1 else False
@@ -107,7 +108,7 @@ def readMeta_new(filePath,Ifprint=True):
             # (T, C, Y, X)->(T, 1, C, Y, X)
             data_shape = (data_shape[0], 1, data_shape[1], data_shape[2], data_shape[3])
         try:
-            avgdiff = ndf.experiment[0].parameters.periodDiff.avg/1000
+            avgdiff = ndf.experiment[0].parameters.periodDiff.avg / 1000
             framerate = 1 / avgdiff
         except:
             t0 = ndf.frame_metadata(0).channels[0].time.relativeTimeMs
@@ -115,54 +116,54 @@ def readMeta_new(filePath,Ifprint=True):
             dt_ms = t1 - t0
             if dt_ms <= 0:
                 raise ValueError("Invalid timestamps: Δt <= 0")
-            framerate = 1000.0 / dt_ms 
+            framerate = 1000.0 / dt_ms
 
         if Ifprint:
-            #get Zratio
-            zRatio=spacing_z/spacing_x
+            # get Zratio
+            zRatio = spacing_z / spacing_x
             print("Z ratio is", zRatio)
-            #get size
-            print("Data size is",[nxpix,nypix,nzpix])
-            #get total frames
-            print("Total frames is",ndf.sizes['T'])
+            # get size
+            print("Data size is", [nxpix, nypix, nzpix])
+            # get total frames
+            print("Total frames is", ndf.sizes["T"])
 
-
-    metadata_dict = { # needed for ImageJ
-    'Pixels': {
-        'PhysicalSizeX': spacing_x,
-        'PhysicalSizeXUnit': 'um',
-        'PhysicalSizeY': spacing_y,
-        'PhysicalSizeYUnit': 'um',
-        'PhysicalSizeZ': spacing_z,
-        'PhysicalSizeZUnit': 'um',
-    },
-    'loop': True,
-    'fps': framerate,
-    'zRatio': zRatio,
-    'nframes': nframes,
-    'nchannels': nchannels,
-    'resolutionxyz': resolutionxyz,
-    'data_shape': data_shape,
-    'dtype': data_dtype,  # Data type (e.g., uint16, float32)
-    'bytes_per_pixel': data_dtype.itemsize,  # Bytes per pixel
-    'spacing_x': spacing_x,
-    'spacing_y': spacing_y,
-    'spacing_z': spacing_z,
-    'axes': 'TZCYX',
-    'SizeC': nchannels,
-    'SizeT': nframes,
-    'SizeZ': nzpix,
-    'SizeX': nxpix,
-    'SizeY': nypix,
-    'multichannel': multichannel,
-    'multiz': multiz,
-    'multiframe': multiframe,
-    'nzpix': nzpix,
-    'nxpix': nxpix,
-    'nypix': nypix,
+    metadata_dict = {  # needed for ImageJ
+        "Pixels": {
+            "PhysicalSizeX": spacing_x,
+            "PhysicalSizeXUnit": "um",
+            "PhysicalSizeY": spacing_y,
+            "PhysicalSizeYUnit": "um",
+            "PhysicalSizeZ": spacing_z,
+            "PhysicalSizeZUnit": "um",
+        },
+        "loop": True,
+        "fps": framerate,
+        "zRatio": zRatio,
+        "nframes": nframes,
+        "nchannels": nchannels,
+        "resolutionxyz": resolutionxyz,
+        "data_shape": data_shape,
+        "dtype": data_dtype,  # Data type (e.g., uint16, float32)
+        "bytes_per_pixel": data_dtype.itemsize,  # Bytes per pixel
+        "spacing_x": spacing_x,
+        "spacing_y": spacing_y,
+        "spacing_z": spacing_z,
+        "axes": "TZCYX",
+        "SizeC": nchannels,
+        "SizeT": nframes,
+        "SizeZ": nzpix,
+        "SizeX": nxpix,
+        "SizeY": nypix,
+        "multichannel": multichannel,
+        "multiz": multiz,
+        "multiframe": multiframe,
+        "nzpix": nzpix,
+        "nxpix": nxpix,
+        "nypix": nypix,
     }
 
     return metadata_dict
+
 
 def get_framerate(filePath):
     with nd2.ND2File(filePath) as f:
@@ -171,26 +172,28 @@ def get_framerate(filePath):
         dt_ms = t1 - t0
         if dt_ms <= 0:
             raise ValueError("Invalid timestamps: Δt <= 0")
-        framerate = 1000.0 / dt_ms  
+        framerate = 1000.0 / dt_ms
         return framerate, dt_ms
-        
+
+
 def getTotalFrames(filePath):
     with nd2.ND2File(filePath) as f:
-        frame=f.sizes['T']
+        frame = f.sizes["T"]
     return frame
 
 
-def readND2Frame(filePath, frames, slices=None, channel=0, xy_down=1, to_memory=True,verbose=False):
+def readND2Frame(
+    filePath, frames, slices=None, channel=0, xy_down=1, to_memory=True, verbose=False
+):
     """
     ND2 reader with high-quality XY downsampling:
       - Z slice selection (via `slices`)
       - XY resampling using skimage.resize with anti-aliasing
     """
-    from skimage.transform import resize
-    from skimage.transform import downscale_local_mean
 
     if channel is None:
         channel = slice(None)
+
     # Normalize indexing to preserve dimensions
     def normalize_index(idx, name):
         """Convert various index types to dimension-preserving format"""
@@ -209,21 +212,19 @@ def readND2Frame(filePath, frames, slices=None, channel=0, xy_down=1, to_memory=
             return idx
         else:
             raise ValueError(f"Invalid {name} index type: {type(idx)}")
-    
-    frames = normalize_index(frames, "frames")
-    slices = normalize_index(slices, "slices") 
-    channel = normalize_index(channel, "channel")
 
+    frames = normalize_index(frames, "frames")
+    slices = normalize_index(slices, "slices")
+    channel = normalize_index(channel, "channel")
 
     with nd2.ND2File(filePath) as f:
         sizes = f.sizes
         dims = list(sizes.keys())
         is_5d = len(dims) == 5
-        metadata = readMeta_new(filePath,Ifprint=verbose)
-        nframes = metadata['nframes']
-        nchannels = metadata['nchannels']
-        nzpix = metadata['nzpix']
-
+        metadata = readMeta_new(filePath, Ifprint=verbose)
+        nframes = metadata["nframes"]
+        nchannels = metadata["nchannels"]
+        nzpix = metadata["nzpix"]
 
         # ------------------------------------
         # Read ND2 data (lazy dask tensor) - ALL FRAMES AT ONCE
@@ -239,33 +240,40 @@ def readND2Frame(filePath, frames, slices=None, channel=0, xy_down=1, to_memory=
             print(f"nframes is {nframes}")
             print(f"nzpix is {nzpix}")
             print(f"nchannels is {nchannels}")
-        
+
         # Add dimensions if they don't exist to ensure 5D structure
         if not multiframe:
             dask_data = dask_data[None]  # Add T dimension
-        
+
         if not multiz:
             dask_data = dask_data[:, None]  # Add Z dimension
-        
+
         if not multichannel:
             dask_data = dask_data[:, :, None]  # Add C dimension
         if verbose:
-            print(f"After adding dimensions: dask_data.shape = {dask_data.shape}, len(data.shape) = {len(dask_data.shape)}")
+            print(
+                f"After adding dimensions: dask_data.shape = {dask_data.shape}, len(data.shape) = {len(dask_data.shape)}"
+            )
 
         # Apply indexing while preserving dimensions
         dask_data = dask_data[frames, ...]
         dask_data = dask_data[:, slices, ...]
-        dask_data = dask_data[:, :, channel,]
+        dask_data = dask_data[
+            :,
+            :,
+            channel,
+        ]
 
         # check if 5D
         if len(dask_data.shape) != 5:
-            raise ValueError(f"After slicing: dask_data.shape = {dask_data.shape}, len(data.shape) = {len(dask_data.shape)}")
-        
+            raise ValueError(
+                f"After slicing: dask_data.shape = {dask_data.shape}, len(data.shape) = {len(dask_data.shape)}"
+            )
+
         if verbose:
             print(f"After slicing: dask_data.shape = {dask_data.shape}")
 
             print(f"dask_data.shape is {dask_data.shape}")
-            
 
         T, Z, C, Y, X = dask_data.shape
 
@@ -280,8 +288,8 @@ def readND2Frame(filePath, frames, slices=None, channel=0, xy_down=1, to_memory=
         # Only compute at the very end if requested
         data = dask_data.compute().astype(np.float32) if to_memory else dask_data
 
+        return data
 
-        return data   
 
 def downsample(data_tzcyx, xy_down=4):
     T, Z, C, Y, X = data_tzcyx.shape
@@ -292,12 +300,15 @@ def downsample(data_tzcyx, xy_down=4):
     data_tzcyx = data_tzcyx.mean(axis=(4, 6))
     return data_tzcyx
 
-def downsample_tiff_series(tiff_folder_or_list, xy_down=4, batch_processing=False, batch_size=50, verbose=True):
+
+def downsample_tiff_series(
+    tiff_folder_or_list, xy_down=4, batch_processing=False, batch_size=50, verbose=True
+):
     """
     Efficiently downsample a series of TIFF files using dask for lazy loading and parallel processing.
-    
+
     Parameters:
-        tiff_folder_or_list (str or list): Either a folder path containing TIFF files, 
+        tiff_folder_or_list (str or list): Either a folder path containing TIFF files,
                                           or a list of TIFF file paths
         xy_down (int): Downsampling factor for X and Y dimensions. Default is 4.
         batch_processing (bool): If True, process TIFFs in batches for very large datasets.
@@ -305,26 +316,26 @@ def downsample_tiff_series(tiff_folder_or_list, xy_down=4, batch_processing=Fals
         batch_size (int): Number of TIFFs to process in each batch when batch_processing=True.
                          Default is 50.
         verbose (bool): Whether to print progress information. Default is True.
-    
+
     Returns:
         dask.array: Downsampled data array with shape (T, Z, C, Y_ds, X_ds) where T is time,
                    Z is depth, C is channel, and Y_ds/X_ds are downsampled spatial dimensions.
                    Call .compute() on the result to get the actual numpy array.
-    
+
     Example:
         # Process all TIFFs in a folder
         result = downsample_tiff_series("/path/to/tiff/folder", xy_down=4)
         downsampled_data = result.compute()
-        
+
         # Process a specific list of TIFF files
         tiff_files = ["/path/to/file1.tif", "/path/to/file2.tif"]
         result = downsample_tiff_series(tiff_files, xy_down=2)
-        
+
         # For very large datasets, use batch processing
-        result = downsample_tiff_series("/path/to/large/dataset", 
+        result = downsample_tiff_series("/path/to/large/dataset",
                                        xy_down=4, batch_processing=True, batch_size=100)
     """
-    
+
     # Handle input: folder path or list of files
     if isinstance(tiff_folder_or_list, str):
         if os.path.isdir(tiff_folder_or_list):
@@ -337,120 +348,134 @@ def downsample_tiff_series(tiff_folder_or_list, xy_down=4, batch_processing=Fals
         tiff_files = tiff_folder_or_list
     else:
         raise ValueError("Input must be either a directory path or a list of TIFF file paths")
-    
+
     if len(tiff_files) == 0:
         raise ValueError("No TIFF files found")
-    
+
     if verbose:
         print(f"Found {len(tiff_files)} TIFF files")
-    
+
     # Read one TIFF to get the shape and dtype
     sample_data = tifffile.imread(tiff_files[0])
     if verbose:
         print(f"Sample TIFF shape: {sample_data.shape}, dtype: {sample_data.dtype}")
-    
+
     @dask.delayed
     def load_tiff(tiff_path):
         """Load a single TIFF file"""
         return tifffile.imread(tiff_path)
-    
+
     if not batch_processing:
         # Process all TIFFs at once (recommended for moderate datasets)
         if verbose:
             print("Processing all TIFFs at once...")
-        
+
         # Create delayed objects for each TIFF
         delayed_arrays = [load_tiff(tiff) for tiff in tiff_files]
-        
+
         # Convert to dask arrays and stack them with optimal chunking
         if len(sample_data.shape) == 3:  # 3D TIFFs (Z, Y, X)
             Z, Y, X = sample_data.shape
             # Chunk size: process a few timepoints at once, keep spatial dims manageable
             chunk_t = min(4, len(tiff_files))
-            dask_arrays = [da.from_delayed(delayed_arr, shape=(Z, Y, X), dtype=sample_data.dtype) 
-                          for delayed_arr in delayed_arrays]
+            dask_arrays = [
+                da.from_delayed(delayed_arr, shape=(Z, Y, X), dtype=sample_data.dtype)
+                for delayed_arr in delayed_arrays
+            ]
             # Stack along time axis to create (T, Z, Y, X)
             data_tzyx = da.stack(dask_arrays, axis=0)
             # Rechunk for better performance: chunk along time, keep spatial dims together
-            data_tzyx = data_tzyx.rechunk((chunk_t, Z, Y//2, X//2))
+            data_tzyx = data_tzyx.rechunk((chunk_t, Z, Y // 2, X // 2))
             # Add channel dimension to make it (T, Z, C, Y, X) for downsample
             data_tzcyx = data_tzyx[:, :, None, :, :]
         else:  # 2D TIFFs (Y, X)
             Y, X = sample_data.shape
             # Process more 2D timepoints at once
             chunk_t = min(8, len(tiff_files))
-            dask_arrays = [da.from_delayed(delayed_arr, shape=(Y, X), dtype=sample_data.dtype) 
-                          for delayed_arr in delayed_arrays]
+            dask_arrays = [
+                da.from_delayed(delayed_arr, shape=(Y, X), dtype=sample_data.dtype)
+                for delayed_arr in delayed_arrays
+            ]
             # Stack along time axis to create (T, Y, X)
             data_tyx = da.stack(dask_arrays, axis=0)
             # Rechunk for better performance
-            data_tyx = data_tyx.rechunk((chunk_t, Y//2, X//2))
+            data_tyx = data_tyx.rechunk((chunk_t, Y // 2, X // 2))
             # Add Z and C dimensions to make it (T, Z, C, Y, X) for downsample
             data_tzcyx = data_tyx[:, None, None, :, :]
-        
+
         if verbose:
             print(f"Dask array shape: {data_tzcyx.shape}")
             print(f"Dask array chunks: {data_tzcyx.chunks}")
-        
+
         # Downsample using the existing downsample function
         data_ds = downsample(data_tzcyx, xy_down=xy_down)
-        
+
         if verbose:
             print(f"Downsampled shape: {data_ds.shape}")
-        
+
         return data_ds
-    
+
     else:
         # Batch processing for very large datasets
         if verbose:
             print(f"Processing TIFFs in batches of {batch_size}...")
-        
+
         results = []
         num_batches = (len(tiff_files) + batch_size - 1) // batch_size
-        
+
         for i in range(0, len(tiff_files), batch_size):
-            batch_tiffs = tiff_files[i:i+batch_size]
+            batch_tiffs = tiff_files[i : i + batch_size]
             batch_num = i // batch_size + 1
-            
+
             if verbose:
                 print(f"Processing batch {batch_num}/{num_batches} ({len(batch_tiffs)} files)")
-            
+
             # Create delayed objects for this batch
             batch_delayed = [load_tiff(tiff) for tiff in batch_tiffs]
-            
+
             # Convert to dask arrays and stack
             if len(sample_data.shape) == 3:  # 3D TIFFs
                 Z, Y, X = sample_data.shape
-                batch_arrays = [da.from_delayed(delayed_arr, shape=(Z, Y, X), dtype=sample_data.dtype) 
-                               for delayed_arr in batch_delayed]
+                batch_arrays = [
+                    da.from_delayed(delayed_arr, shape=(Z, Y, X), dtype=sample_data.dtype)
+                    for delayed_arr in batch_delayed
+                ]
                 batch_data = da.stack(batch_arrays, axis=0)[:, :, None, :, :]
             else:  # 2D TIFFs
                 Y, X = sample_data.shape
-                batch_arrays = [da.from_delayed(delayed_arr, shape=(Y, X), dtype=sample_data.dtype) 
-                               for delayed_arr in batch_delayed]
+                batch_arrays = [
+                    da.from_delayed(delayed_arr, shape=(Y, X), dtype=sample_data.dtype)
+                    for delayed_arr in batch_delayed
+                ]
                 batch_data = da.stack(batch_arrays, axis=0)[:, None, None, :, :]
-            
+
             # Downsample this batch
             batch_ds = downsample(batch_data, xy_down=xy_down)
-            
+
             # Compute and store result
             batch_result = batch_ds.compute()
             results.append(batch_result)
-            
+
             if verbose:
                 print(f"Batch {batch_num} completed, shape: {batch_result.shape}")
-        
+
         # Concatenate all batch results and convert back to dask array
         final_result = np.concatenate(results, axis=0)
         if verbose:
             print(f"Final concatenated result shape: {final_result.shape}")
-        
+
         # Convert back to dask array for consistency
-        return da.from_array(final_result, chunks=(min(8, final_result.shape[0]), 
-                                                  final_result.shape[1], 
-                                                  final_result.shape[2], 
-                                                  final_result.shape[3]//2, 
-                                                  final_result.shape[4]//2))
+        return da.from_array(
+            final_result,
+            chunks=(
+                min(8, final_result.shape[0]),
+                final_result.shape[1],
+                final_result.shape[2],
+                final_result.shape[3] // 2,
+                final_result.shape[4] // 2,
+            ),
+        )
+
 
 def reset_dir(path, force=False):
     # FIX: added `force` flag (default False) so callers can reset without blocking
@@ -469,10 +494,14 @@ def reset_dir(path, force=False):
                 print("Skipped.")
     else:
         os.makedirs(path)
-def downsample_tifs_dask(input_folder, output_folder, downsample_xy=4, downsample_t=1, n_workers=4,verbose=True):
+
+
+def downsample_tifs_dask(
+    input_folder, output_folder, downsample_xy=4, downsample_t=1, n_workers=4, verbose=True
+):
     """
     Read TIF files, downsample, and save to new folder using Dask for parallelization.
-    
+
     Parameters
     ----------
     input_folder : str
@@ -487,27 +516,26 @@ def downsample_tifs_dask(input_folder, output_folder, downsample_xy=4, downsampl
         Number of parallel workers for Dask
     """
     import dask
-    from dask import delayed
-    import tifffile
     import numpy as np
-    from scipy.ndimage import zoom
-    
+    import tifffile
+    from dask import delayed
+
     # Create output folder if it doesn't exist
     os.makedirs(output_folder, exist_ok=True)
-    
+
     # Get list of TIF files
-    tif_files = sorted([f for f in os.listdir(input_folder) if f.endswith(('.tif', '.tiff'))])
+    tif_files = sorted([f for f in os.listdir(input_folder) if f.endswith((".tif", ".tiff"))])
     tif_files = tif_files[::downsample_t]
 
     if verbose:
         print(f"Found {len(tif_files)} TIF files to process")
-    
+
     @delayed
     def process_single_tif(filename):
         """Process a single TIF file: read, downsample, save."""
         input_path = os.path.join(input_folder, filename)
         output_path = os.path.join(output_folder, filename)
-        
+
         # Read the TIF file
         with tifffile.TiffFile(input_path) as tif:
             image = tif.asarray()
@@ -516,59 +544,59 @@ def downsample_tifs_dask(input_folder, output_folder, downsample_xy=4, downsampl
                 original_metadata = tif.imagej_metadata or {}
             except:
                 original_metadata = {}
-        
+
         # Determine dimensions and downsample accordingly
         # Expected format: TZCYX (5D) or ZCYX (4D) or ZYX (3D) or YX (2D)
         ndim = image.ndim
-        
+
         if ndim == 4:  # ZCYX or TCYX
             image = image[:, :, ::downsample_xy, ::downsample_xy]
         elif ndim == 3:  # ZYX or TYX
             image = image[:, ::downsample_xy, ::downsample_xy]
         elif ndim == 2:  # YX
             image = image[::downsample_xy, ::downsample_xy]
-        
+
         # Ensure 5D for saving (TZCYX)
         while image.ndim < 5:
             image = image[np.newaxis, ...]
-        
+
         # Update metadata with new shape and adjusted spacing
         metadata = {
-            'spacing_x': original_metadata.get('spacing_x', 1.0) * downsample_xy,
-            'spacing_y': original_metadata.get('spacing_y', 1.0) * downsample_xy,
-            'data_shape': image.shape,
-            'downsample_xy': downsample_xy,
-            'downsample_t': downsample_t,
+            "spacing_x": original_metadata.get("spacing_x", 1.0) * downsample_xy,
+            "spacing_y": original_metadata.get("spacing_y", 1.0) * downsample_xy,
+            "data_shape": image.shape,
+            "downsample_xy": downsample_xy,
+            "downsample_t": downsample_t,
         }
-        
+
         # Save using tifffile (same format as saveTiff_new)
-        spacing_x = metadata['spacing_x']
-        spacing_y = metadata['spacing_y']
-        
+        spacing_x = metadata["spacing_x"]
+        spacing_y = metadata["spacing_y"]
+
         with tifffile.TiffWriter(output_path, imagej=True) as tif_writer:
             tif_writer.write(
-                image, 
-                metadata=metadata, 
-                resolution=(1.0/spacing_x, 1.0/spacing_y)
+                image, metadata=metadata, resolution=(1.0 / spacing_x, 1.0 / spacing_y)
             )
-        
+
         return filename
-    
+
     # Create delayed tasks for all files
     tasks = [process_single_tif(f) for f in tif_files]
-    
+
     # Execute in parallel with progress bar
     if verbose:
         print(f"Processing {len(tasks)} files with {n_workers} workers...")
-    
+
     from dask.diagnostics import ProgressBar
+
     with ProgressBar():
-        with dask.config.set(scheduler='threads', num_workers=n_workers):
+        with dask.config.set(scheduler="threads", num_workers=n_workers):
             results = dask.compute(*tasks)
     if verbose:
         print(f"   Processed {len(results)} files")
         print(f"   Output folder: {output_folder}")
     return list(results)
+
 
 def downsample_nd2_to_tiff_folder(
     nd2_path,
@@ -580,7 +608,7 @@ def downsample_nd2_to_tiff_folder(
     channel=0,
     n_workers=4,
     dtype=np.float32,
-    verbose=True
+    verbose=True,
 ):
     """
     Downsample ND2 file using Dask (stride-based) and save as TIFF series in parallel.
@@ -611,9 +639,11 @@ def downsample_nd2_to_tiff_folder(
         Output dtype
     verbose : bool
     """
-    from dask import delayed, compute
+    from dask import compute, delayed
     from dask.diagnostics import ProgressBar
+
     os.makedirs(output_folder, exist_ok=True)
+
     def normalize_index(idx):
         if idx is None:
             return slice(None)
@@ -649,6 +679,7 @@ def downsample_nd2_to_tiff_folder(
         if verbose:
             print(f"[INFO] Normalized ND2 shape -> TZCYX: {dask_data.shape}")
         return dask_data
+
     with nd2.ND2File(nd2_path) as f:
         dask_data = f.to_dask()
         dims = list(f.sizes.keys())
@@ -660,18 +691,18 @@ def downsample_nd2_to_tiff_folder(
             frame_list = frame_list[::ds_t]
         dask_data = dask_data[frame_list]
         dask_data = dask_data[
-            slice(None, None, 1),          # T
-            normalize_index(slices),          # Z
-            normalize_index(channel),         # C
-            slice(None, None, ds_xy),         # Y
-            slice(None, None, ds_xy)          # X
+            slice(None, None, 1),  # T
+            normalize_index(slices),  # Z
+            normalize_index(channel),  # C
+            slice(None, None, ds_xy),  # Y
+            slice(None, None, ds_xy),  # X
         ]
         if verbose:
             print(f"[INFO] After slicing/downsample: {dask_data.shape}")
 
-    
     tasks = []
     T = dask_data.shape[0]
+
     @delayed
     def save_frame_outer(frame_data, out_folder, fidx, ch, dtype):
         vol = frame_data.astype(dtype)
@@ -679,17 +710,23 @@ def downsample_nd2_to_tiff_folder(
         out_path = os.path.join(out_folder, out_name)
         tifffile.imwrite(out_path, vol, imagej=True)
         return out_path
+
     # FIX: removed dead commented-out save_frame closure that was superseded by save_frame_outer
     for i in range(T):
         frame_idx = frame_list[i]
-        tasks.append(save_frame_outer(dask_data[i], output_folder, fidx=frame_idx, ch=channel, dtype=dtype))
+        tasks.append(
+            save_frame_outer(dask_data[i], output_folder, fidx=frame_idx, ch=channel, dtype=dtype)
+        )
     if verbose:
         print(f"[INFO] Processing {T} frames with {n_workers} threads...")
     with ProgressBar():
         compute(*tasks, scheduler="threads", num_workers=n_workers)
     if verbose:
         print(f"[DONE] ND2 downsampled TIFFs saved to {output_folder}")
-    return [os.path.join(output_folder, f"vol_ch{channel}_downsample_{frame_list[i]:06d}.tif") for i in range(T)]
+    return [
+        os.path.join(output_folder, f"vol_ch{channel}_downsample_{frame_list[i]:06d}.tif")
+        for i in range(T)
+    ]
 
 
 def saveTiff(image_list, config_path, save_path):
@@ -715,6 +752,7 @@ def saveTiff(image_list, config_path, save_path):
     config_data = toml.load(config_path)
 
     import json
+
     config_str = json.dumps(config_data, ensure_ascii=False)
 
     # check the list
@@ -722,13 +760,8 @@ def saveTiff(image_list, config_path, save_path):
         if not isinstance(img, np.ndarray):
             raise ValueError(f"element{i} is not a image")
 
+    tifffile.imwrite(save_path, image_list, description=config_str, bigtiff=True)
 
-    tifffile.imwrite(
-        save_path,
-        image_list,
-        description=config_str,
-        bigtiff=True
-    )
 
 def saveTiff_new(image, save_path, config_path=None, metadata=None, verbose=True):
     """
@@ -744,16 +777,16 @@ def saveTiff_new(image, save_path, config_path=None, metadata=None, verbose=True
         raise ValueError("All saved should be 5D (TZCYX)")
 
     if metadata is not None:
-        spacing_x = metadata['spacing_x']
-        spacing_y = metadata['spacing_y']
-        metadata['data_shape'] = image.shape
+        spacing_x = metadata["spacing_x"]
+        spacing_y = metadata["spacing_y"]
+        metadata["data_shape"] = image.shape
     else:
         metadata = {}
         spacing_x = 1
         spacing_y = 1
-        metadata['spacing_x'] = spacing_x
-        metadata['spacing_y'] = spacing_y
-        metadata['data_shape'] = image.shape
+        metadata["spacing_x"] = spacing_x
+        metadata["spacing_y"] = spacing_y
+        metadata["data_shape"] = image.shape
 
     if verbose:
         print(f"Saving TIFF file to {save_path}")
@@ -763,12 +796,15 @@ def saveTiff_new(image, save_path, config_path=None, metadata=None, verbose=True
             print(f"  - config: {config_path}")
 
     with tifffile.TiffWriter(save_path, imagej=True) as tif:
-        tif.write(image, metadata=metadata, resolution=(1.0/spacing_x, 1.0/spacing_y), description=config_path)
+        tif.write(
+            image,
+            metadata=metadata,
+            resolution=(1.0 / spacing_x, 1.0 / spacing_y),
+            description=config_path,
+        )
 
 
-    
-def saveZarr(mem_data, ca_data, reference, config_path, save_path,
-             chunks=(1, 512, 512)):
+def saveZarr(mem_data, ca_data, reference, config_path, save_path, chunks=(1, 512, 512)):
     """
     Save membrane channel, calcium channel, and reference image into one Zarr store.
 
@@ -788,19 +824,19 @@ def saveZarr(mem_data, ca_data, reference, config_path, save_path,
     config_str = json.dumps(config_data, ensure_ascii=False)
 
     # ensure numpy array
-    mem_data = np.asarray(mem_data,dtype=np.float32)
-    ca_data = np.asarray(ca_data,dtype=np.float32)
-    reference = np.asarray(reference,dtype=np.float32)
-
-
+    mem_data = np.asarray(mem_data, dtype=np.float32)
+    ca_data = np.asarray(ca_data, dtype=np.float32)
+    reference = np.asarray(reference, dtype=np.float32)
 
     # open zarr root
-    root = zarr.open(save_path, mode='w')
+    root = zarr.open(save_path, mode="w")
 
     # create datasets
     root.create_dataset("membrane", data=mem_data, chunks=chunks, overwrite=True)
     root.create_dataset("calcium", data=ca_data, chunks=chunks, overwrite=True)
-    root.create_dataset("reference", data=reference, overwrite=True)  # usually 2D, so no chunks needed
+    root.create_dataset(
+        "reference", data=reference, overwrite=True
+    )  # usually 2D, so no chunks needed
 
     # save config
     root.attrs["config"] = config_str
@@ -810,8 +846,17 @@ def saveZarr(mem_data, ca_data, reference, config_path, save_path,
     print(f"  - calcium : {ca_data.shape}")
     print(f"  - reference: {reference.shape}")
 
-def saveZarr_fast(mem_data, ca_data, reference, config_path, save_path,
-                  chunks=(16, 512, 512), compressor=None, single_file=False):
+
+def saveZarr_fast(
+    mem_data,
+    ca_data,
+    reference,
+    config_path,
+    save_path,
+    chunks=(16, 512, 512),
+    compressor=None,
+    single_file=False,
+):
     """
     Fast Zarr saving for membrane, calcium and reference data.
 
@@ -828,14 +873,15 @@ def saveZarr_fast(mem_data, ca_data, reference, config_path, save_path,
     Returns:
         None
     """
-    import zarr
     import json
+
     import toml
+    import zarr
     from numcodecs import Blosc
 
     # default compressor
     if compressor is None:
-        compressor = Blosc(cname='zstd', clevel=1, shuffle=Blosc.BITSHUFFLE)
+        compressor = Blosc(cname="zstd", clevel=1, shuffle=Blosc.BITSHUFFLE)
 
     # load config
     config_data = toml.load(config_path)
@@ -843,19 +889,23 @@ def saveZarr_fast(mem_data, ca_data, reference, config_path, save_path,
 
     # switch to numpy
     mem_data = np.asarray(mem_data, dtype=np.float32)
-    ca_data  = np.asarray(ca_data,dtype=np.float32)
-    reference = np.asarray(reference,dtype=np.float32)
+    ca_data = np.asarray(ca_data, dtype=np.float32)
+    reference = np.asarray(reference, dtype=np.float32)
 
     # open Zarr store
     if single_file:
-        store = zarr.ZipStore(save_path + ".zip", mode='w')
+        store = zarr.ZipStore(save_path + ".zip", mode="w")
     else:
-        store = save_path  
-    root = zarr.open(store, mode='w')
+        store = save_path
+    root = zarr.open(store, mode="w")
 
     # create datasets
-    root.create_dataset("membrane", data=mem_data, chunks=chunks, compressor=compressor, overwrite=True)
-    root.create_dataset("calcium", data=ca_data, chunks=chunks, compressor=compressor, overwrite=True)
+    root.create_dataset(
+        "membrane", data=mem_data, chunks=chunks, compressor=compressor, overwrite=True
+    )
+    root.create_dataset(
+        "calcium", data=ca_data, chunks=chunks, compressor=compressor, overwrite=True
+    )
     root.create_dataset("reference", data=reference, compressor=compressor, overwrite=True)
 
     # save config
@@ -865,7 +915,8 @@ def saveZarr_fast(mem_data, ca_data, reference, config_path, save_path,
     print(f"  - membrane: {mem_data.shape}")
     print(f"  - calcium : {ca_data.shape}")
     print(f"  - reference: {reference.shape}")
-                      
+
+
 # FIX: renamed from readTifff (triple-f typo) to readTiff
 def readTiff(tiff_path):
     with tifffile.TiffFile(tiff_path) as tif:
@@ -875,8 +926,10 @@ def readTiff(tiff_path):
             desc = desc.value
     return images, desc
 
-def write_volume_as_ome_tiff(volume, out_dir, ch_idx, frame_idx, configPath,
-                             spacing_x=1.0, spacing_y=1.0):
+
+def write_volume_as_ome_tiff(
+    volume, out_dir, ch_idx, frame_idx, configPath, spacing_x=1.0, spacing_y=1.0
+):
     """
     volume: np.ndarray, shape (Z,Y,X) or (Y,X)
     out_dir: target directory
@@ -886,7 +939,7 @@ def write_volume_as_ome_tiff(volume, out_dir, ch_idx, frame_idx, configPath,
     if isinstance(frame_idx, int):
         frame_tag = f"{frame_idx:06d}"
     elif isinstance(frame_idx, str):
-        cleaned = frame_idx.replace('-', '~').replace('_', '~')
+        cleaned = frame_idx.replace("-", "~").replace("_", "~")
         parts = cleaned.split("~")
         if len(parts) == 1:
             try:
@@ -900,9 +953,9 @@ def write_volume_as_ome_tiff(volume, out_dir, ch_idx, frame_idx, configPath,
                 frame_tag = f"{a:06d}_{b:06d}"
             except:
                 raise ValueError(f"Invalid frame_idx string: {frame_idx}")
-        elif len(parts)==5:
+        elif len(parts) == 5:
             try:
-                a, b ,c,d= int(parts[0]), int(parts[1]),int(parts[3]),int(parts[4])
+                a, b, c, d = int(parts[0]), int(parts[1]), int(parts[3]), int(parts[4])
                 frame_tag = f"{a:04d}~{b:04d}_vs_{c:04d}~{d:04d}"
             except:
                 raise ValueError(f"Invalid frame_idx string: {frame_idx}")
@@ -921,26 +974,22 @@ def write_volume_as_ome_tiff(volume, out_dir, ch_idx, frame_idx, configPath,
     img5d = zvol[np.newaxis, :, np.newaxis, :, :]  # (1,Z,1,Y,X)
     os.makedirs(out_dir, exist_ok=True)
     fname = os.path.join(out_dir, f"vol_{ch_idx}_{frame_tag}.tif")
-    metadata = {
-        'spacing_x': spacing_x,
-        'spacing_y': spacing_y,
-        'data_shape': img5d.shape
-    }
+    metadata = {"spacing_x": spacing_x, "spacing_y": spacing_y, "data_shape": img5d.shape}
 
-    saveTiff_new(img5d, fname, config_path=configPath,
-                    metadata=metadata, verbose=False)
+    saveTiff_new(img5d, fname, config_path=configPath, metadata=metadata, verbose=False)
 
     return fname
 
-def write_multichannel_volume_as_ome_tiff(volume, out_dir, frame_idx, configPath=None,label=None,
-                                          spacing_x=1.0, spacing_y=1.0):
+
+def write_multichannel_volume_as_ome_tiff(
+    volume, out_dir, frame_idx, configPath=None, label=None, spacing_x=1.0, spacing_y=1.0
+):
     """
     volume: list of c arrays, each (Z,Y,X)
         ch0, ch1, ch2
 
     output OME TIFF shape: (1, Z, c, Y, X)
     """
-
 
     processed = []
     for v in volume:
@@ -952,25 +1001,15 @@ def write_multichannel_volume_as_ome_tiff(volume, out_dir, frame_idx, configPath
             v = v.astype(np.float32)
         processed.append(v)
 
-    img5d = np.stack(processed, axis=0)     # (3, Z, Y, X)
-    img5d = img5d[np.newaxis, :, :, :, :]   # (1,3,Z,Y,X)
+    img5d = np.stack(processed, axis=0)  # (3, Z, Y, X)
+    img5d = img5d[np.newaxis, :, :, :, :]  # (1,3,Z,Y,X)
     img5d = np.transpose(img5d, (0, 2, 1, 3, 4))  # → (1,Z,3,Y,X)
 
     fname = os.path.join(out_dir, f"vol_{label}_{frame_idx:06d}.tif")
 
-    metadata = {
-        'spacing_x': spacing_x,
-        'spacing_y': spacing_y,
-        'data_shape': img5d.shape
-    }
+    metadata = {"spacing_x": spacing_x, "spacing_y": spacing_y, "data_shape": img5d.shape}
 
-    saveTiff_new(
-        img5d,
-        fname,
-        config_path=configPath,
-        metadata=metadata,
-        verbose=False
-    )                
+    saveTiff_new(img5d, fname, config_path=configPath, metadata=metadata, verbose=False)
 
 
 def read_reg_tiff(folder, frame_idx, ch_idx):
@@ -979,4 +1018,3 @@ def read_reg_tiff(folder, frame_idx, ch_idx):
         raise FileNotFoundError(f"Cannot find {fname}")
     vol = tifffile.imread(fname)  # (Z,Y,X)
     return vol
-

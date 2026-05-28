@@ -1,6 +1,6 @@
 import numpy as np
-from skimage.morphology import binary_opening, binary_dilation, disk
 from skimage.measure import label, regionprops
+from skimage.morphology import binary_dilation, binary_opening
 
 
 def bwareafilt3_wei(vol, size_range):
@@ -56,13 +56,13 @@ def bwareafilt3_wei(vol, size_range):
 
 def getMask(dat_mov, thres_factor):
     """
-    Generate a binary mask from 3D data using statistical thresholding 
+    Generate a binary mask from 3D data using statistical thresholding
     and morphological operations.
-    
+
     This function creates a mask by identifying voxels that deviate significantly
     from the mean (outliers) and then applies morphological operations to clean
     up the mask by removing noise and filling small gaps.
-    
+
     Parameters:
     -----------
     dat_mov : numpy.ndarray
@@ -70,7 +70,7 @@ def getMask(dat_mov, thres_factor):
     thres_factor : float
         Threshold factor for statistical outlier detection. Higher values create
         more restrictive masks (fewer voxels selected).
-    
+
     Returns:
     --------
     numpy.ndarray
@@ -78,29 +78,29 @@ def getMask(dat_mov, thres_factor):
     """
     # Convert input data to float32 for consistent numerical operations
     dat_mov = dat_mov.astype(np.float32)
-    
+
     # Calculate statistical measures of the entire volume
-    mu = np.mean(dat_mov)      # Mean intensity value
-    sigma = np.std(dat_mov)    # Standard deviation of intensity values
-    
+    mu = np.mean(dat_mov)  # Mean intensity value
+    sigma = np.std(dat_mov)  # Standard deviation of intensity values
+
     # Normalize data by converting to z-scores and taking absolute values
     # This measures how many standard deviations each voxel is from the mean
     normalized = np.abs((dat_mov - mu) / sigma)
-    
+
     # Create initial binary mask by thresholding normalized values
     # Voxels with z-scores above threshold are considered significant
     mask = normalized > thres_factor
-    
+
     # Define structuring element for morphological operations
     # 4x4x1 kernel - processes in 2D slices along the z-axis
     selem = np.ones((3, 3, 1), dtype=bool)
-    
+
     # Apply binary opening: erosion followed by dilation
     # This removes small noise artifacts and thin connections
     mask = binary_opening(mask, selem)
-    
+
     # Apply binary dilation to restore size and fill small gaps
     # This expands the remaining structures after opening
     mask = binary_dilation(mask, selem)
-    
+
     return mask

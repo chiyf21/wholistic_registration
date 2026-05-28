@@ -22,8 +22,8 @@ except PackageNotFoundError:  # editable install before metadata is generated
 from .core.main_function import DefineParams, Registration_v3, ReliableAnalysis
 
 __all__ = [
-    "__version__",
     "DefineParams",
     "Registration_v3",
     "ReliableAnalysis",
+    "__version__",
 ]

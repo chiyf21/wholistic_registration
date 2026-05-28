@@ -12,20 +12,17 @@ Overview:
     This file contains functions for 3D interpolation  of volumetric images and some supported functions.
     It includes GPU-accelerated trilinear interpolation, resizing functions, and index correction based on motion data.
 
-    
+
 functions:
     - interp3Grid: Performs trilinear interpolation on 3D data using GPU.
     - ind2sub: Converts linear indices to subscripts for a multidimensional array.
     - correctIdx: Corrects indices based on motion data.
     - correctGrid: Corrects coordinates based on motion data.
     - rangeConstrain: Ensures a value is within a specified range.
-    
+
 """
 
-import numpy as np
-from scipy.ndimage import zoom
-import warnings
-from . import cp, Gimage, RegularGridInterpolator
+from . import Gimage, cp
 
 
 def interp3Grid(image, coords_new, method="linear", mode="nearest", extrapval=0):
@@ -43,9 +40,7 @@ def interp3Grid(image, coords_new, method="linear", mode="nearest", extrapval=0)
         order = 0
     else:
         raise ValueError(f"Unsupported interpolation method: {method}")
-    image_warped = Gimage.map_coordinates(
-        image, coords_new, order=order, mode=mode, cval=extrapval
-    )
+    image_warped = Gimage.map_coordinates(image, coords_new, order=order, mode=mode, cval=extrapval)
 
     return image_warped
 
@@ -69,9 +64,7 @@ def ind2sub(siz, ndx):
     if lensiz < 2:
         raise ValueError("Size must have at least 2 dimensions.")
 
-    if not cp.issubdtype(type(ndx), cp.integer) and not cp.issubdtype(
-        type(ndx), cp.floating
-    ):
+    if not cp.issubdtype(type(ndx), cp.integer) and not cp.issubdtype(type(ndx), cp.floating):
         raise ValueError("Index should be an integer or floating-point number.")
 
     # Flatten ndx if it's an array-like object

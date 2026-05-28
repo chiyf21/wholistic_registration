@@ -14,8 +14,8 @@ def test_package_imports() -> None:
 def test_public_api_callables() -> None:
     from wholistic_registration import (
         DefineParams,
-        ReliableAnalysis,
         Registration_v3,
+        ReliableAnalysis,
     )
 
     assert callable(DefineParams)
