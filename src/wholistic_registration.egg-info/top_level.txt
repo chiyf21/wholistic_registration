@@ -1,2 +1,0 @@
-demo_toy
-wholistic_registration
