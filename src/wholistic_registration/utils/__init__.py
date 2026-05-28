@@ -2,7 +2,11 @@
 Common utilities for wbi module with graceful CuPy/NumPy fallback.
 """
 
+import logging
+
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 # Try to import CuPy, fallback to NumPy if not available
 CUPY_AVAILABLE = False
@@ -15,16 +19,18 @@ try:
         cp_original.cuda.Device(0).compute_capability
         cp = cp_original
         CUPY_AVAILABLE = True
-        print("CuPy is available with CUDA - using GPU acceleration")
+        logger.info("CuPy is available with CUDA - using GPU acceleration")
     except cp_original.cuda.runtime.CUDARuntimeError:
         # CuPy is installed but no CUDA device available
         cp = np
         CUPY_AVAILABLE = False
-        print("CuPy installed but no CUDA device available - falling back to NumPy (CPU only)")
+        logger.info(
+            "CuPy installed but no CUDA device available - falling back to NumPy (CPU only)"
+        )
 except ImportError:
     cp = np
     CUPY_AVAILABLE = False
-    print("CuPy not available - falling back to NumPy (CPU only)")
+    logger.info("CuPy not available - falling back to NumPy (CPU only)")
 
 # Try to import CuPy SciPy modules, fallback to regular SciPy
 if CUPY_AVAILABLE and cp_original is not None:
@@ -42,7 +48,7 @@ if CUPY_AVAILABLE and cp_original is not None:
         from scipy.interpolate import RegularGridInterpolator as CupyRegularGridInterpolator
         CUPYX_INTERPOLATE_AVAILABLE = False
 else:
-    print("CuPy not available - import standardscipy")
+    logger.info("CuPy not available - importing standard scipy")
     import scipy.ndimage as cupy_ndimage
     CUPYX_NDIMAGE_AVAILABLE = False
     from scipy.interpolate import RegularGridInterpolator as CupyRegularGridInterpolator
