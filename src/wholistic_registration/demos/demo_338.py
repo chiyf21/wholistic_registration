@@ -1,6 +1,6 @@
 import h5py
-import utils as wbi
-from utils import preprocess, calFlow3d_Wei_v1, visulization,mask,option
+from wholistic_registration import utils as wbi
+from wholistic_registration.utils import preprocess, calFlow3d_Wei_v1, visualization, mask, option
 import numpy as np
 import nd2
 

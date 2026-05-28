@@ -1,5 +1,5 @@
-from core import main_function
-from utils import cp
+from wholistic_registration.core import main_function
+from wholistic_registration.utils import cp
 ## Since CUDA requires the spawn start method, we must wrap the code in if __name__ == "__main__": if you want to parallelize the code.
 import numpy as np
 if __name__ == "__main__":

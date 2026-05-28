@@ -1,9 +1,9 @@
 import h5py
-from utils import preprocess, calFlow3d_Wei_v1, visualization,mask,option,IO,reference
+from wholistic_registration.utils import preprocess, calFlow3d_Wei_v1, visualization, mask, option, IO, reference
 #By Yunfeng  Chi
 #2025/8/11
 #add a new package:registration
-from utils import registration
+from wholistic_registration.utils import registration
 import numpy as np
 import nd2
 import tifffile as tiff

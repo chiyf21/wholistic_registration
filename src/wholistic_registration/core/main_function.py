@@ -1,4 +1,4 @@
-from utils import IO,reference,registration
+from ..utils import IO, reference, registration
 import toml
 import numpy as np
 import os

@@ -1,7 +1,7 @@
 #%%
 # %load_ext autoreload
 # %autoreload 2
-from core import main_function
+from wholistic_registration.core import main_function
 configFile='./code/wholistic_registration/configs/config_0120.toml'
 
 # Define data path and the normal config
