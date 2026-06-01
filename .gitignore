@@ -82,3 +82,5 @@ env/
 results/
 registrated_data/
 src/wholistic_registration/registrated_data/
+src/wholistic_registration/HR_exp
+*.txt
