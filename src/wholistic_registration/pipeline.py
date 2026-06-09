@@ -5,36 +5,39 @@ from wholistic_registration.utils import cp
 
 if __name__ == "__main__":
     # configFile='/home/cyf/wbi/Virginia/code/wbi_0123/wholistic_registration/src/wholistic_registration/configs/config_f2013_0225.toml'
-    configFile = "/home/cyf/wbi/Virginia/code/wbi_0123/wholistic_registration/src/wholistic_registration/configs/config_f338_0326.toml"
+    configFile = '/home/cyf/wbi/Virginia/code/wbi_0123/wholistic_registration/src/wholistic_registration/configs/config_f338_0412.toml'
     # Define data path and the normal config
-    cp.cuda.Device(1).use()
-    # main_function.DefineParams(
-    #     configFile=configFile,
-    #     inputFile="/home/cyf/wbi/Virginia/raw_data/f338/221124_f338_ubi_gCaMP7f_bactin_mCherry_CAAX_7dpf002.nd2",
-    #     outputFile='/home/cyf/wbi/Virginia/registrated_data/f338/f338_registrated_0326/',
-    #     downsampleXY=1,
-    #     frame_downsample=1,# new params
-    #     frames = (0,800),
-    #     dual_channel=True,
-    #     save_motion=True,
-    #     time_measurement='frame', # 'frame' or 'minute'
-    #     downsampleZ=[5,6,7], #choose which planes to use
-    #     window_size=235, ##  minutes or frames (depends on time_measurement)
-    #     mid_window_size=236, ## minutes or frames (depends on time_measurement)
-    #     reference_chunk=50, ## minutes or frames (depends on time_measurement)
-    #     mid_stride=1, #frames
-    #     # offset_radius=5,
-    #     # patch_sigma=2,
-    #     # structure_tau=0.5, # details are in the main_function.py
-    #     # structure_beta=0.05,
-    #     layer=3,
-    #     verbose=True
-    # )
+    cp.cuda.Device(0).use()
+    main_function.DefineParams(
+        configFile=configFile, 
+        inputFile="/home/cyf/wbi/Virginia/raw_data/f338/221124_f338_ubi_gCaMP7f_bactin_mCherry_CAAX_7dpf002.nd2",
+        outputFile='/home/cyf/wbi/Virginia/registrated_data/f338/f338_registrated_0530/', 
+        downsampleXY=1,
+        frame_downsample=1,# new params
+        dual_channel=True,
+        save_motion=True,
+        time_measurement='frame', # 'frame' or 'minute'
+        downsampleZ=-1, #choose which planes to use
+        window_size=400, ##  minutes or frames (depends on time_measurement)
+        mid_window_size=400, ## minutes or frames (depends on time_measurement)
+        reference_chunk=50, ## minutes or frames (depends on time_measurement)
+        mid_stride=10, #frames
+    
+        # offset_radius=5,
+        # patch_sigma=2,
+        # structure_tau=0.5, # details are in the main_function.py
+        # structure_beta=0.05,
+        layer=2,
+        verbose=True
+    )
 
-    # # #     # ##########################################################################################
-    # # #     # ## main process
-    # # #     ## Do registration
-    main_function.Registration_v3(configFile, parallel=True)
+# # #     # ##########################################################################################
+# # #     # ## main process 
+# # #     ## Do registration
+    main_function.Registration_v3(
+        configFile,
+        parallel=False
+    )
 
 # #     # # # reliable analysis
 # main_function.ReliableAnalysis(

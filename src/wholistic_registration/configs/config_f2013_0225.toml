@@ -65,4 +65,4 @@ batch_size = 100
 
 [save_config]
 save_ref = true
-save_motion = false
+save_motion = true

@@ -481,6 +481,641 @@ def generate_continuous_H_gpu(stack, zRatio):
 
     return H
 
+_PROJECT_TO_PLANES_NANMAX_KERNEL = cp.RawKernel(r'''
+extern "C" __global__
+void project_to_planes_nanmax_kernel(
+    const float* values,          // (Nvox,), shifted values, should be non-negative
+    const float* coords,          // (Nvox, 3), xyz
+    const float* target_z,        // (Nplanes,)
+    float* out,                   // (Nplanes, Xout, Yout), flattened
+    const long long Nvox,
+    const int Nplanes,
+    const int Xref,
+    const int Yref,
+    const int Xout,
+    const int Yout,
+    const float z_window,
+    const int downsample_xy,
+    const int use_nearest_xy,
+    const int xy_extra_radius
+) {
+    long long tid = blockDim.x * blockIdx.x + threadIdx.x;
+    long long total = Nvox * (long long)Nplanes;
+
+    if (tid >= total) return;
+
+    long long voxel_id = tid / Nplanes;
+    int plane_id = (int)(tid - voxel_id * Nplanes);
+
+    float val = values[voxel_id];
+    if (!isfinite(val)) return;
+
+    float x = coords[voxel_id * 3 + 0];
+    float y = coords[voxel_id * 3 + 1];
+    float z = coords[voxel_id * 3 + 2];
+
+    if (!isfinite(x) || !isfinite(y) || !isfinite(z)) return;
+
+    float z0 = target_z[plane_id];
+
+    // z slab selection:
+    // the moving surface point contributes to this target plane
+    // only if it lies within z0 +/- z_window.
+    if (fabsf(z - z0) > z_window) return;
+
+    int x_start, x_end;
+    int y_start, y_end;
+
+    if (use_nearest_xy) {
+        // Old behavior: one point -> one output pixel.
+        int xi = (int)floorf(x + 0.5f);
+        int yi = (int)floorf(y + 0.5f);
+
+        x_start = xi;
+        x_end   = xi;
+        y_start = yi;
+        y_end   = yi;
+    } else {
+        // Subpixel footprint splatting:
+        // A point at x=10.1 contributes to pixels around floor(x)=10 and ceil(x)=11.
+        // xy_extra_radius expands this footprint.
+        int xf = (int)floorf(x);
+        int yf = (int)floorf(y);
+
+        x_start = xf - xy_extra_radius;
+        x_end   = xf + 1 + xy_extra_radius;
+        y_start = yf - xy_extra_radius;
+        y_end   = yf + 1 + xy_extra_radius;
+    }
+
+    for (int xi = x_start; xi <= x_end; ++xi) {
+        if (xi < 0 || xi >= Xref) continue;
+
+        int xo = xi / downsample_xy;
+        if (xo < 0 || xo >= Xout) continue;
+
+        for (int yi = y_start; yi <= y_end; ++yi) {
+            if (yi < 0 || yi >= Yref) continue;
+
+            int yo = yi / downsample_xy;
+            if (yo < 0 || yo >= Yout) continue;
+
+            long long out_idx =
+                ((long long)plane_id * Xout * Yout)
+                + ((long long)xo * Yout)
+                + yo;
+
+            // Safe because values have been shifted to be non-negative.
+            atomicMax((int*)(&out[out_idx]), __float_as_int(val));
+        }
+    }
+}
+''', 'project_to_planes_nanmax_kernel')
+
+_PROJECT_TO_PLANES_WEIGHTED_AVG_KERNEL = cp.RawKernel(r'''
+extern "C" __global__
+void project_to_planes_weighted_avg_kernel(
+    const float* values,          // (Nvox,)
+    const float* coords,          // (Nvox, 3), xyz
+    const float* target_z,        // (Nplanes,)
+    float* sum_val,               // (Nplanes, Xout, Yout)
+    float* sum_w,                 // (Nplanes, Xout, Yout)
+    const long long Nvox,
+    const int Nplanes,
+    const int Xref,
+    const int Yref,
+    const int Xout,
+    const int Yout,
+    const float z_window,
+    const float z_sigma,
+    const int downsample_xy,
+    const int z_weight_mode
+) {
+    long long tid = blockDim.x * blockIdx.x + threadIdx.x;
+    long long total = Nvox * (long long)Nplanes;
+
+    if (tid >= total) return;
+
+    long long voxel_id = tid / Nplanes;
+    int plane_id = (int)(tid - voxel_id * Nplanes);
+
+    float val = values[voxel_id];
+    if (!isfinite(val)) return;
+
+    float x = coords[voxel_id * 3 + 0];
+    float y = coords[voxel_id * 3 + 1];
+    float z = coords[voxel_id * 3 + 2];
+
+    if (!isfinite(x) || !isfinite(y) || !isfinite(z)) return;
+
+    if (x < 0.0f || x > (float)(Xref - 1) || y < 0.0f || y > (float)(Yref - 1)) {
+        return;
+    }
+
+    float z0 = target_z[plane_id];
+    float dz = fabsf(z - z0);
+
+    if (dz > z_window) return;
+
+    float wz = 1.0f;
+
+    if (z_weight_mode == 0) {
+        // hard slab
+        wz = 1.0f;
+    } else if (z_weight_mode == 1) {
+        // triangular slab weight
+        wz = 1.0f - dz / (z_window + 1e-6f);
+        if (wz < 0.0f) wz = 0.0f;
+    } else {
+        // gaussian slab weight
+        float sigma = z_sigma;
+        if (sigma <= 0.0f) sigma = z_window * 0.5f;
+        wz = expf(-0.5f * dz * dz / (sigma * sigma + 1e-6f));
+    }
+
+    if (wz <= 0.0f || !isfinite(wz)) return;
+
+    // Important:
+    // do bilinear splatting directly in output-resolution coordinates.
+    float xo_f = x / (float)downsample_xy;
+    float yo_f = y / (float)downsample_xy;
+
+    int xo0 = (int)floorf(xo_f);
+    int yo0 = (int)floorf(yo_f);
+
+    float dx = xo_f - (float)xo0;
+    float dy = yo_f - (float)yo0;
+
+    for (int ax = 0; ax <= 1; ++ax) {
+        int xo = xo0 + ax;
+        if (xo < 0 || xo >= Xout) continue;
+
+        float wx = (ax == 0) ? (1.0f - dx) : dx;
+
+        for (int ay = 0; ay <= 1; ++ay) {
+            int yo = yo0 + ay;
+            if (yo < 0 || yo >= Yout) continue;
+
+            float wy = (ay == 0) ? (1.0f - dy) : dy;
+
+            float w = wx * wy * wz;
+            if (w <= 0.0f || !isfinite(w)) continue;
+
+            long long out_idx =
+                ((long long)plane_id * Xout * Yout)
+                + ((long long)xo * Yout)
+                + yo;
+
+            atomicAdd(&sum_val[out_idx], val * w);
+            atomicAdd(&sum_w[out_idx], w);
+        }
+    }
+}
+''', 'project_to_planes_weighted_avg_kernel')
+
+def project_coords_to_fixed_planes_weighted_gpu(
+    coords_ref_xyk_xyz,
+    ref_volume,
+    target_z_planes,
+    values_xyk=None,
+    ref_volume_order="xyz",
+    z_window=1.5,
+    z_sigma=None,
+    z_weight_mode="gaussian",
+    downsample_xy=1,
+    fill_value=0.0,
+    return_numpy=False,
+    output_order="zyx",
+    eps=1e-6,
+):
+    """
+    Smooth projection onto fixed reference-space z planes.
+
+    Compared with max splatting, this function uses:
+        - continuous reference sampling;
+        - z-slab weighting;
+        - XY bilinear splatting;
+        - weighted average accumulation.
+
+    This is recommended for generating stable fixed-view movies.
+
+    Parameters
+    ----------
+    coords_ref_xyk_xyz:
+        shape (Xmov, Ymov, K, 3)
+        phase_new, mapping moving grid to reference coordinates.
+
+    ref_volume:
+        reference volume.
+
+        ref_volume_order="xyz": shape (Xref, Yref, Zref)
+        ref_volume_order="zyx": shape (Zref, Yref, Xref)
+
+    target_z_planes:
+        fixed reference z planes to observe.
+
+    values_xyk:
+        If None:
+            values are sampled from ref_volume at coords_ref_xyk_xyz.
+            This matches your current reference-derived output logic.
+
+        If provided:
+            directly project values_xyk into reference planes.
+
+    z_window:
+        Only samples with abs(z_ref - target_z) <= z_window are used.
+
+    z_sigma:
+        Gaussian z weighting sigma.
+        If None, use z_window / 2.
+
+    z_weight_mode:
+        "hard", "triangular", or "gaussian".
+
+    downsample_xy:
+        Output XY downsample factor.
+
+    fill_value:
+        Fill value for pixels with no accumulated weight.
+
+    output_order:
+        "zyx": return (Nplanes, Yout, Xout)
+        "zxy": return (Nplanes, Xout, Yout)
+    """
+
+    coords = cp.asarray(coords_ref_xyk_xyz, dtype=cp.float32)
+
+    if coords.ndim != 4 or coords.shape[-1] != 3:
+        raise ValueError(
+            f"coords_ref_xyk_xyz should have shape (X,Y,K,3), got {coords.shape}"
+        )
+
+    ref = cp.asarray(ref_volume, dtype=cp.float32)
+
+    if ref.ndim != 3:
+        raise ValueError(f"ref_volume should be 3D, got {ref.shape}")
+
+    if ref_volume_order == "xyz":
+        Xref, Yref, Zref = ref.shape
+        ref_xyz = ref
+    elif ref_volume_order == "zyx":
+        Zref, Yref, Xref = ref.shape
+        ref_xyz = ref.transpose(2, 1, 0)
+    else:
+        raise ValueError("ref_volume_order should be 'xyz' or 'zyx'.")
+
+    downsample_xy = int(downsample_xy)
+    if downsample_xy < 1:
+        raise ValueError("downsample_xy should be >= 1.")
+
+    Xout = int((Xref + downsample_xy - 1) // downsample_xy)
+    Yout = int((Yref + downsample_xy - 1) // downsample_xy)
+
+    target_z = cp.atleast_1d(cp.asarray(target_z_planes, dtype=cp.float32))
+    Nplanes = int(target_z.size)
+
+    if values_xyk is None:
+        H_ref = generate_continuous_H_gpu(ref_xyz, zRatio=1)
+        values = apply_H_to_matrix_gpu(coords, H_ref).astype(cp.float32, copy=False)
+    else:
+        values = cp.asarray(values_xyk, dtype=cp.float32)
+        if values.shape != coords.shape[:-1]:
+            raise ValueError(
+                f"values_xyk shape {values.shape} does not match coords shape {coords.shape[:-1]}"
+            )
+
+    coords_flat = cp.ascontiguousarray(coords.reshape(-1, 3))
+    values_flat = cp.ascontiguousarray(values.reshape(-1))
+
+    Nvox = int(values_flat.size)
+
+    sum_val = cp.zeros((Nplanes, Xout, Yout), dtype=cp.float32)
+    sum_w = cp.zeros((Nplanes, Xout, Yout), dtype=cp.float32)
+
+    if z_sigma is None:
+        z_sigma = float(z_window) * 0.5
+
+    if z_weight_mode == "hard":
+        z_weight_mode_id = 0
+    elif z_weight_mode == "triangular":
+        z_weight_mode_id = 1
+    elif z_weight_mode == "gaussian":
+        z_weight_mode_id = 2
+    else:
+        raise ValueError("z_weight_mode should be 'hard', 'triangular', or 'gaussian'.")
+
+    threads = 256
+    blocks = int((Nvox * Nplanes + threads - 1) // threads)
+
+    _PROJECT_TO_PLANES_WEIGHTED_AVG_KERNEL(
+        (blocks,),
+        (threads,),
+        (
+            values_flat,
+            coords_flat,
+            target_z,
+            sum_val,
+            sum_w,
+            np.int64(Nvox),
+            np.int32(Nplanes),
+            np.int32(Xref),
+            np.int32(Yref),
+            np.int32(Xout),
+            np.int32(Yout),
+            np.float32(z_window),
+            np.float32(z_sigma),
+            np.int32(downsample_xy),
+            np.int32(z_weight_mode_id),
+        ),
+    )
+
+    out = cp.empty_like(sum_val)
+
+    valid = sum_w > eps
+    out = cp.where(
+        valid,
+        sum_val / cp.maximum(sum_w, eps),
+        cp.asarray(fill_value, dtype=cp.float32),
+    )
+
+    if output_order == "zyx":
+        out = out.transpose(0, 2, 1)
+        weight_out = sum_w.transpose(0, 2, 1)
+    elif output_order == "zxy":
+        weight_out = sum_w
+    else:
+        raise ValueError("output_order should be 'zyx' or 'zxy'.")
+
+    if return_numpy:
+        return cp.asnumpy(out), cp.asnumpy(weight_out)
+
+    return out, weight_out
+
+def project_coords_to_fixed_planes_gpu(
+    coords_ref_xyk_xyz,
+    ref_volume=None,
+    target_z_planes=None,
+    values_xyk=None,
+    ref_volume_order="xyz",
+    z_window=1.5,
+    downsample_xy=1,
+    fill_value=0.0,
+    return_numpy=False,
+    output_order="zyx",
+    xy_splat_mode="subpixel_footprint",
+    xy_extra_radius=0,
+):
+    """
+    Project signal onto fixed reference-space z planes using z-slab selection
+    and XY subpixel footprint max splatting.
+
+    Main intended mode for your current task:
+        values_xyk=None
+
+    In this mode:
+        1. sample ref_volume at coords_ref_xyk_xyz;
+        2. select samples whose z coordinate lies within target_z +/- z_window;
+        3. splat them to fixed reference XY planes with max projection.
+
+    Parameters
+    ----------
+    coords_ref_xyk_xyz:
+        ndarray or cp.ndarray, shape (Xmov, Ymov, K, 3)
+
+        coords_ref_xyk_xyz[..., 0] = x_ref
+        coords_ref_xyk_xyz[..., 1] = y_ref
+        coords_ref_xyk_xyz[..., 2] = z_ref
+
+        Usually this is phase_new from getMotion_v2.
+
+    ref_volume:
+        Reference volume.
+
+        If ref_volume_order == "xyz":
+            shape should be (Xref, Yref, Zref)
+
+        If ref_volume_order == "zyx":
+            shape should be (Zref, Yref, Xref)
+
+    target_z_planes:
+        Scalar or array-like.
+
+        Fixed reference z planes that you want to observe.
+
+    values_xyk:
+        Optional, shape (Xmov, Ymov, K).
+
+        If None:
+            values are sampled from ref_volume at coords_ref_xyk_xyz.
+
+        If provided:
+            values_xyk is directly splatted into reference planes.
+            This is useful if you want to project moving-frame signal back
+            into reference space.
+
+    z_window:
+        Half thickness of z slab.
+
+        A point contributes to target plane z0 if:
+            abs(z_ref - z0) <= z_window
+
+    downsample_xy:
+        Output XY downsample factor.
+
+        This is applied during splatting:
+            xo = xi // downsample_xy
+            yo = yi // downsample_xy
+
+    fill_value:
+        Value for output pixels with no projected samples.
+
+    xy_splat_mode:
+        "nearest":
+            old behavior. One sample writes to one rounded output pixel.
+
+        "subpixel_footprint":
+            recommended. One sample writes to floor/ceil XY footprint.
+            This reduces holes caused by forward mapping.
+
+    xy_extra_radius:
+        Extra radius around the floor/ceil footprint.
+
+        If xy_splat_mode="subpixel_footprint":
+
+            xy_extra_radius=0:
+                sample affects 2x2 pixels:
+                    floor(x):floor(x)+1,
+                    floor(y):floor(y)+1
+
+            xy_extra_radius=1:
+                sample affects 4x4 pixels:
+                    floor(x)-1 : floor(x)+2,
+                    floor(y)-1 : floor(y)+2
+
+        Start with 0. If holes remain, try 1.
+
+    output_order:
+        "zyx":
+            return shape (Nplanes, Yout, Xout), image-friendly.
+
+        "zxy":
+            return shape (Nplanes, Xout, Yout), internal coordinate order.
+
+    return_numpy:
+        If True, return numpy array.
+        If False, return cupy array.
+    """
+
+    if target_z_planes is None:
+        raise ValueError("target_z_planes must be provided.")
+
+    coords = cp.asarray(coords_ref_xyk_xyz, dtype=cp.float32)
+
+    if coords.ndim != 4 or coords.shape[-1] != 3:
+        raise ValueError(
+            f"coords_ref_xyk_xyz should have shape (X,Y,K,3), got {coords.shape}"
+        )
+
+    if ref_volume is None:
+        raise ValueError("ref_volume must be provided to infer reference shape.")
+
+    ref = cp.asarray(ref_volume, dtype=cp.float32)
+
+    if ref.ndim != 3:
+        raise ValueError(f"ref_volume should be 3D, got {ref.shape}")
+
+    if ref_volume_order == "xyz":
+        Xref, Yref, Zref = ref.shape
+        ref_xyz = ref
+    elif ref_volume_order == "zyx":
+        Zref, Yref, Xref = ref.shape
+        ref_xyz = ref.transpose(2, 1, 0)
+    else:
+        raise ValueError("ref_volume_order should be 'xyz' or 'zyx'.")
+
+    downsample_xy = int(downsample_xy)
+    if downsample_xy < 1:
+        raise ValueError("downsample_xy should be >= 1.")
+
+    Xout = int((Xref + downsample_xy - 1) // downsample_xy)
+    Yout = int((Yref + downsample_xy - 1) // downsample_xy)
+
+    target_z = cp.atleast_1d(cp.asarray(target_z_planes, dtype=cp.float32))
+    Nplanes = int(target_z.size)
+
+    # ------------------------------------------------------------
+    # 1. Prepare values to project.
+    # ------------------------------------------------------------
+    if values_xyk is None:
+        # Your preferred mode:
+        # sample reference volume at continuous reference coordinates.
+        H_ref = generate_continuous_H_gpu(ref_xyz, zRatio=1)
+        values = apply_H_to_matrix_gpu(coords, H_ref).astype(cp.float32, copy=False)
+    else:
+        values = cp.asarray(values_xyk, dtype=cp.float32)
+        if values.shape != coords.shape[:-1]:
+            raise ValueError(
+                f"values_xyk shape {values.shape} does not match coords shape {coords.shape[:-1]}"
+            )
+
+    # ------------------------------------------------------------
+    # 2. Shift values to non-negative range for atomicMax on float bits.
+    #
+    # Do NOT clamp by cp.maximum(values, 0), because your adjusted reference
+    # can have negative background values, e.g. percentile 0.1 = -188.
+    # ------------------------------------------------------------
+    finite_values = values[cp.isfinite(values)]
+
+    if finite_values.size > 0:
+        vmin = cp.min(finite_values)
+        value_shift = cp.maximum(-vmin + cp.asarray(1.0, dtype=cp.float32),
+                                 cp.asarray(0.0, dtype=cp.float32))
+    else:
+        value_shift = cp.asarray(0.0, dtype=cp.float32)
+
+    values_for_kernel = values + value_shift
+
+    coords_flat = cp.ascontiguousarray(coords.reshape(-1, 3))
+    values_flat = cp.ascontiguousarray(values_for_kernel.reshape(-1))
+
+    Nvox = int(values_flat.size)
+
+    # Use -inf as empty marker.
+    out = cp.full((Nplanes, Xout, Yout), -cp.inf, dtype=cp.float32)
+
+    if xy_splat_mode == "nearest":
+        use_nearest_xy = 1
+        xy_extra_radius_kernel = 0
+    elif xy_splat_mode == "subpixel_footprint":
+        use_nearest_xy = 0
+        xy_extra_radius_kernel = int(xy_extra_radius)
+        if xy_extra_radius_kernel < 0:
+            raise ValueError("xy_extra_radius should be >= 0.")
+    else:
+        raise ValueError(
+            "xy_splat_mode should be 'nearest' or 'subpixel_footprint'."
+        )
+
+    # ------------------------------------------------------------
+    # 3. GPU splatting.
+    # ------------------------------------------------------------
+    threads = 256
+    blocks = int((Nvox * Nplanes + threads - 1) // threads)
+
+    _PROJECT_TO_PLANES_NANMAX_KERNEL(
+        (blocks,),
+        (threads,),
+        (
+            values_flat,
+            coords_flat,
+            target_z,
+            out,
+            np.int64(Nvox),
+            np.int32(Nplanes),
+            np.int32(Xref),
+            np.int32(Yref),
+            np.int32(Xout),
+            np.int32(Yout),
+            np.float32(z_window),
+            np.int32(downsample_xy),
+            np.int32(use_nearest_xy),
+            np.int32(xy_extra_radius_kernel),
+        ),
+    )
+
+    # ------------------------------------------------------------
+    # 4. Shift values back.
+    # ------------------------------------------------------------
+    valid_out = cp.isfinite(out)
+    out = cp.where(valid_out, out - value_shift, out)
+
+    # ------------------------------------------------------------
+    # 5. Fill empty pixels.
+    # ------------------------------------------------------------
+    if fill_value is not None:
+        out = cp.where(
+            cp.isfinite(out),
+            out,
+            cp.asarray(fill_value, dtype=cp.float32)
+        )
+
+    # ------------------------------------------------------------
+    # 6. Output order.
+    # ------------------------------------------------------------
+    if output_order == "zyx":
+        # internal: (Nplanes, Xout, Yout)
+        # image:    (Nplanes, Yout, Xout)
+        out = out.transpose(0, 2, 1)
+    elif output_order == "zxy":
+        pass
+    else:
+        raise ValueError("output_order should be 'zyx' or 'zxy'.")
+
+    if return_numpy:
+        return cp.asnumpy(out)
+
+    return out
+
 
 def apply_H_to_matrix_gpu(A, H):
     """
@@ -1400,7 +2035,11 @@ def optimize_layer_cross_resolution(
     currentError = None
 
     AverageFilter = cp.ones((2 * r + 1, 2 * r + 1, 1), dtype=cp.float32)
+    Xcp = xG_grid.astype(cp.float32)
+    Ycp = yG_grid.astype(cp.float32)
+    Zcp = zG_grid.astype(cp.float32)
 
+    phase_identity_cp = cp.stack([Xcp, Ycp, Zcp], axis=-1)
     for it in range(iterNum):
         old_motion = motion_current.copy()
 
@@ -1421,15 +2060,9 @@ def optimize_layer_cross_resolution(
 
         # change the motion current to phase new 20260607 15:54
         # neiDiff = getNeiDiff(motion_current[xG_grid, yG_grid, zG_grid, :], 1)
-        phase_cp = phase_new[xG_grid, yG_grid, zG_grid, :]
-        Xcp = xG_grid.astype(cp.float32)
-        Ycp = yG_grid.astype(cp.float32)
-        Zcp = zG_grid.astype(cp.float32)
-
-        phase_identity_cp = cp.stack([Xcp, Ycp, Zcp], axis=-1)
+        phase_cp = phase_new[xG_grid,yG_grid,zG_grid,:]
         phase_residual_cp = phase_cp - phase_identity_cp
         neiDiff = getNeiDiff(phase_residual_cp, 1)
-
         neiSum = smoothPenaltySum * neiDiff
 
         diffError, penaltyError = calError(residual, neiDiff, smoothPenaltySum)
@@ -1819,7 +2452,7 @@ def getMotion_v2(data_mov, data_ref, option, verbose=False):
     layer_num = int(option["layer"])
     iterNum = int(option["iter"])
     r = int(option["r"])
-    zRatio_raw = float(option["zRatio"])
+    zRatio_raw = float(option.get("zRatio", 1.0))
     zRatio_HR = float(option["zRatio_HR"])
     smoothPenalty = float(option["smoothPenalty"])
     movRange = float(option.get("movRange", 5.0))
