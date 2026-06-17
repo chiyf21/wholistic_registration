@@ -142,23 +142,23 @@ I^{mov}, I^{ref}
 \phi^{coarse},
 $$
 
-where $$I^{mov}$$ is the moving sparse stack, $$I^{ref}$$ is the reference volume, $$\mathbf{z}^{init}$$ denotes the initial reference z-indices of the moving slices, and $$\phi^{coarse}$$ is the coarse 3D coordinate field predicted by the model.
+where $I^{mov}$ is the moving sparse stack, $I^{ref}$ is the reference volume, $\mathbf{z}^{init}$ denotes the initial reference z-indices of the moving slices, and $\phi^{coarse}$ is the coarse 3D coordinate field predicted by the model.
 
 ---
 
 ### Global Fixed-spacing Z Initialization
 
-The moving image is a sparse stack with $$K$$ slices, while the reference image is a dense 3D volume with $$Z$$ slices. Since the moving slices are acquired with approximately fixed axial spacing, their corresponding reference z-locations can be represented as
+The moving image is a sparse stack with $K$ slices, while the reference image is a dense 3D volume with $Z$ slices. Since the moving slices are acquired with approximately fixed axial spacing, their corresponding reference z-locations can be represented as
 
 $$
 z_k = z_0 + k \Delta z_{ref} d,
 $$
 
-where $$z_0$$ is the unknown starting reference slice, $$\Delta z_{ref}$$ is the fixed spacing in the reference z-index system, and $$d$$ is the z-direction.
+where $z_0$ is the unknown starting reference slice, $\Delta z_{ref}$ is the fixed spacing in the reference z-index system, and $d$ is the z-direction.
 
-To estimate $$z_0$$, we compute a global ZNCC score between each moving slice and each reference slice. By default, the ZNCC is computed on the 2D gradient magnitude images rather than raw intensities, making the initialization more sensitive to structural similarity and less sensitive to absolute intensity changes. A Hann window is used as a spatial weight to reduce the influence of boundary artifacts.
+To estimate $z_0$, we compute a global ZNCC score between each moving slice and each reference slice. By default, the ZNCC is computed on the 2D gradient magnitude images rather than raw intensities, making the initialization more sensitive to structural similarity and less sensitive to absolute intensity changes. A Hann window is used as a spatial weight to reduce the influence of boundary artifacts.
 
-Let $$S(k,z)$$ be the weighted ZNCC score between the $$k$$-th moving slice and the $$z$$-th reference slice. We enumerate all valid starting positions $$z_0$$ and maximize the total fixed-spacing alignment score:
+Let $S(k,z)$ be the weighted ZNCC score between the $k$-th moving slice and the $z$-th reference slice. We enumerate all valid starting positions $z_0$ and maximize the total fixed-spacing alignment score:
 
 $$
 z_0^*
@@ -189,7 +189,7 @@ This step produces a globally consistent axial initialization for the entire spa
 
 ### Learning-based Coarse Matching Model
 
-After obtaining $$\mathbf{z}^{init}$$, we use a learning-based coarse matching model to estimate the 3D reference coordinate of each moving control point. The model takes three inputs:
+After obtaining $\mathbf{z}^{init}$, we use a learning-based coarse matching model to estimate the 3D reference coordinate of each moving control point. The model takes three inputs:
 
 $$
 I^{mov}, \quad I^{ref}, \quad \mathbf{z}^{init},
@@ -207,7 +207,7 @@ x^{ref}_{kij}
 \right),
 $$
 
-where $$k$$ indexes the moving slice and $$(i,j)$$ indexes the spatial control grid on that slice.
+where $k$ indexes the moving slice and $(i,j)$ indexes the spatial control grid on that slice.
 
 The model does not perform dense full-volume matching. Instead, it uses the initial z positions and the moving control-grid coordinates to define an initial reference coordinate for each query:
 
@@ -221,7 +221,7 @@ x_{ij}
 \right).
 $$
 
-For each query, the model searches only within a local 3D reference window centered at $$\mathbf{c}_0$$ or at the coordinate predicted by the previous refinement iteration. This design avoids the prohibitive memory cost of full global matching over the entire reference volume.
+For each query, the model searches only within a local 3D reference window centered at $\mathbf{c}_0$ or at the coordinate predicted by the previous refinement iteration. This design avoids the prohibitive memory cost of full global matching over the entire reference volume.
 
 ---
 
@@ -271,7 +271,7 @@ $$
 \right\}_{m=1}^{M},
 $$
 
-where $$M$$ is the number of candidate points in the local search window. The matcher computes a score $$s_m$$ for each candidate using feature similarity, learned pairwise matching, relative offset encoding, and local cross-attention between the moving query and the sampled reference candidates.
+where $M$ is the number of candidate points in the local search window. The matcher computes a score $s_m$ for each candidate using feature similarity, learned pairwise matching, relative offset encoding, and local cross-attention between the moving query and the sampled reference candidates.
 
 The candidate scores are converted into a probability distribution:
 
@@ -484,7 +484,7 @@ Because the data are time-lapse images, adjacent frames usually have related mot
 
 The deformation field is estimated using the registration channel, but the same spatial mapping can be applied to other channels.
 
-After the mapping $$\phi_t$$ is estimated, we apply it to the biological-marker reference channel. This produces a registered biological-marker image in the same coordinate system as the current moving frame.
+After the mapping $\phi_t$ is estimated, we apply it to the biological-marker reference channel. This produces a registered biological-marker image in the same coordinate system as the current moving frame.
 
 This is important because the biological-marker channel may be sparse, discontinuous, or less suitable for direct registration. By estimating the deformation from a more structural channel and applying it to the marker channel, we obtain a more reliable registered marker signal.
 
@@ -529,7 +529,7 @@ I^{ref}_{adj}
 I^{mapped}_t.
 $$
 
-Here, $$I^{mov}_t$$ is the moving image at time point $$t$$, $$I^{ref}_{adj}$$ is the intensity-adjusted reference image, $$\phi_t$$ is the estimated spatial mapping, and $$I^{mapped}_t$$ is the registered output.
+Here, $I^{mov}_t$ is the moving image at time point $t$, $I^{ref}_{adj}$ is the intensity-adjusted reference image, $\phi_t$ is the estimated spatial mapping, and $I^{mapped}_t$ is the registered output.
 
 This design makes the pipeline robust to both spatial motion and intensity distribution changes, which are common in long-term biological imaging data.
 
